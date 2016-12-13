@@ -5,11 +5,13 @@
 #include "TSRM.h"
 #endif
 
-#include <leveldb/c.h>
+#include <rocksdb/c.h>
+#include <pthread.h>
 
 ZEND_BEGIN_MODULE_GLOBALS(uc)
     char *storage_directory;
-    leveldb_t *leveldb_handle;
+    rocksdb_t *db_handle;
+    pthread_mutex_t counter_lock;
 ZEND_END_MODULE_GLOBALS(uc)
 
 #ifdef ZTS

@@ -5,6 +5,7 @@
 #include "php.h"
 #include "php_ini.h"
 #include "php_uc.h"
+#include <pthread.h>
 
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
@@ -48,21 +49,19 @@ PHP_MINIT_FUNCTION(uc)
     ZEND_INIT_MODULE_GLOBALS(uc, php_uc_init_globals, NULL);
     REGISTER_INI_ENTRIES();
 
-    leveldb_options_t *options;
-    leveldb_readoptions_t *roptions;
-    leveldb_writeoptions_t *woptions;
+    rocksdb_options_t *options = rocksdb_options_create();
+
     char *err = NULL;
 
-    options = leveldb_options_create();
-    leveldb_options_set_create_if_missing(options, 1);
-    UC_G(leveldb_handle) = leveldb_open(options, UC_G(storage_directory), &err);
+    rocksdb_options_set_create_if_missing(options, 1);
+    UC_G(db_handle) = rocksdb_open(options, UC_G(storage_directory), &err);
 
     if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Opening the LevelDB database failed.");
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Opening the database failed.");
         return FAILURE;
     }
 
-    leveldb_free(err);
+    rocksdb_free(err);
     err = NULL;
 
     return SUCCESS;
@@ -80,3 +79,15 @@ PHP_FUNCTION(uc_test)
     RETURN_STRING("UC Test");
 }
 
+// uc_fetch
+// uc_store
+// uc_inc
+// uc_dec
+// uc_clear_cache
+// uc_delete
+// UCIterator
+
+PHP_FUNCTION(uc_fetch)
+{
+    RETURN_STRING("UC Test");
+}

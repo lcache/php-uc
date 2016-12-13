@@ -1,44 +1,52 @@
 PHP_ARG_ENABLE(uc, whether to enable User Cache support,
 [  --enable-uc           Enable User Cache support])
 
+PHP_ARG_WITH(rocksdb, path to RocksDB for User Cache,
+[  --with-rocksdb=DIR    Directory for RocksDB])
+
 if test "$PHP_UC" != "no"; then
   AC_DEFINE(UC, 1, [ ])
 
-  dnl Search for and link to LevelDB
-  if test -r $PHP_UC/include/leveldb/c.h; then
-    LEVELDB_DIR=$PHP_UC
+  dnl Search for and link to RocksDB
+  if test "$PHP_ROCKSDB" != "no"; then
+    ROCKSDB_DIR=$PHP_ROCKSDB
+	  AC_MSG_RESULT(looking in $ROCKSDB_DIR)
   else
-    AC_MSG_CHECKING(for LevelDB in default path)
-    for i in /usr/local /usr; do
-      if test -r $i/include/leveldb/c.h; then
-        LEVELDB_DIR=$i
-        AC_MSG_RESULT(found in $i)
-        break
-      fi
-    done
+    if test -r $PHP_UC/include/rocksdb/c.h; then
+      ROCKSDB_DIR=$PHP_UC
+    else
+      AC_MSG_CHECKING(for RocksDB in default path)
+      for i in /usr/local /usr; do
+        if test -r $i/include/rocksdb/c.h; then
+	  ROCKSDB_DIR=$i
+	  AC_MSG_RESULT(found in $i)
+	  break
+        fi
+      done
+    fi
   fi
 
-  AC_MSG_CHECKING([for LevelDB])
-  PHP_CHECK_LIBRARY(leveldb, leveldb_open, [
-    PHP_ADD_LIBRARY_WITH_PATH(leveldb, $LEVELDB_DIR, UC_SHARED_LIBADD)
-    PHP_ADD_INCLUDE($LEVELDB_DIR/include)
+  AC_MSG_CHECKING([for RocksDB])
+  PHP_CHECK_LIBRARY(rocksdb, rocksdb_open, [
+    PHP_ADD_LIBRARY_WITH_PATH(rocksdb, $ROCKSDB_DIR, UC_SHARED_LIBADD)
+    PHP_ADD_INCLUDE($ROCKSDB_DIR/include)
   ],[
     AC_MSG_RESULT([not found])
-    AC_MSG_ERROR([Please install LevelDB first or check that leveldb-devel is present])
+    AC_MSG_ERROR([Please install RocksDB first or check that rocksdb-devel is present])
   ],[
-    APM_SHARED_LIBADD -lleveldb
+    APM_SHARED_LIBADD -lrocksdb
   ])
 
-  AC_DEFINE(HAVE_LEVELDB, 1, [LevelDB found and included])
+  AC_DEFINE(HAVE_ROCKSDB, 1, [RocksDB found and included])
 
 
-  dnl if test -z "$LEVELDB_DIR"; then
+  dnl if test -z "$ROCKSDB_DIR"; then
   dnl   AC_MSG_RESULT([not found])
-  dnl   AC_MSG_ERROR([Please install LevelDB development resources])
+  dnl   AC_MSG_ERROR([Please install RocksDB development resources])
   dnl fi
 
-  dnl PHP_ADD_LIBRARY_WITH_PATH(leveldb, $LEVELDB_DIR, LEVELDB_SHARED_LIBADD)
-  dnl PHP_ADD_INCLUDE($LEVELDB_DIR/include)
+  dnl PHP_ADD_LIBRARY_WITH_PATH(rocksdb, $ROCKSDB_DIR, ROCKSDB_SHARED_LIBADD)
+  dnl PHP_ADD_INCLUDE($ROCKSDB_DIR/include)
   PHP_SUBST(UC_SHARED_LIBADD)
 
   PHP_NEW_EXTENSION(uc, uc.c, $ext_shared)

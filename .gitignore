@@ -28,5 +28,4 @@ run-tests.php
 config.log
 .deps
 include/
-ldb/
 *.la
