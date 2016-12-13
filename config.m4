@@ -34,16 +34,10 @@ if test "$PHP_UC" != "no"; then
     AC_MSG_RESULT([not found])
     AC_MSG_ERROR([Please install RocksDB first or check that rocksdb-devel is present])
   ],[
-    UC_SHARED_LIBADD --library-path=$ROCKSDB_DIR -lrocksdb
+    UC_SHARED_LIBADD -L$ROCKSDB_DIR -lrocksdb
   ])
 
   AC_DEFINE(HAVE_ROCKSDB, 1, [RocksDB found and included])
-
-
-  dnl if test -z "$ROCKSDB_DIR"; then
-  dnl   AC_MSG_RESULT([not found])
-  dnl   AC_MSG_ERROR([Please install RocksDB development resources])
-  dnl fi
 
   PHP_SUBST(UC_SHARED_LIBADD)
 
