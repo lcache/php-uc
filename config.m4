@@ -10,7 +10,7 @@ if test "$PHP_UC" != "no"; then
   dnl Search for and link to RocksDB
   if test "$PHP_ROCKSDB" != "no"; then
     ROCKSDB_DIR=$PHP_ROCKSDB
-	  AC_MSG_RESULT(looking in $ROCKSDB_DIR)
+	  AC_MSG_RESULT(using $ROCKSDB_DIR)
   else
     if test -r $PHP_UC/include/rocksdb/c.h; then
       ROCKSDB_DIR=$PHP_UC
@@ -28,13 +28,13 @@ if test "$PHP_UC" != "no"; then
 
   AC_MSG_CHECKING([for RocksDB])
   PHP_CHECK_LIBRARY(rocksdb, rocksdb_open, [
-    PHP_ADD_LIBRARY_WITH_PATH(rocksdb, $ROCKSDB_DIR, UC_SHARED_LIBADD)
+    PHP_ADD_LIBRARY_WITH_PATH(rocksdb, $ROCKSDB_DIR, UC_STATIC_LIBADD)
     PHP_ADD_INCLUDE($ROCKSDB_DIR/include)
   ],[
     AC_MSG_RESULT([not found])
     AC_MSG_ERROR([Please install RocksDB first or check that rocksdb-devel is present])
   ],[
-    APM_SHARED_LIBADD -lrocksdb
+    UC_SHARED_LIBADD -lrocksdb
   ])
 
   AC_DEFINE(HAVE_ROCKSDB, 1, [RocksDB found and included])
