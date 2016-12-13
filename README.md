@@ -16,5 +16,5 @@ A PHP extension providing an APCu-compatible API sufficient for LCache and built
 1. Build PHP User Cache:
 
         phpize
-        ./configure --with-rocksdb=~/Sandbox/rocksdb-$RELEASE
+        ./configure --with-rocksdb=$HOME/Sandbox/rocksdb-$RELEASE
         
