@@ -2,7 +2,7 @@ PHP_ARG_ENABLE(uc, whether to enable User Cache support,
 [  --enable-uc           Enable User Cache support])
 
 PHP_ARG_WITH(rocksdb, path to RocksDB for User Cache,
-[  --with-rocksdb=DIR    Directory for RocksDB])
+[  --with-rocksdb=DIR    Directory with static build of RocksDB])
 
 if test "$PHP_UC" != "no"; then
   AC_DEFINE(UC, 1, [ ])
@@ -34,7 +34,7 @@ if test "$PHP_UC" != "no"; then
     AC_MSG_RESULT([not found])
     AC_MSG_ERROR([Please install RocksDB first or check that rocksdb-devel is present])
   ],[
-    UC_SHARED_LIBADD -L$ROCKSDB_DIR -lrocksdb
+    UC_SHARED_LIBADD -L$ROCKSDB_DIR -R$ROCKSDB_DIR -lrocksdb
   ])
 
   AC_DEFINE(HAVE_ROCKSDB, 1, [RocksDB found and included])

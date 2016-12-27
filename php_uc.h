@@ -11,6 +11,7 @@
 ZEND_BEGIN_MODULE_GLOBALS(uc)
     char *storage_directory;
     rocksdb_t *db_handle;
+    rocksdb_column_family_handle_t* cf_handles[3];
     pthread_mutex_t counter_lock;
 ZEND_END_MODULE_GLOBALS(uc)
 

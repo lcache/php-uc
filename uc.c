@@ -7,6 +7,10 @@
 #include "php_uc.h"
 #include <pthread.h>
 
+#define TTL_SHORT 3600
+#define TTL_LONG 86400
+#define CF_COUNT 3
+
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
 static zend_function_entry uc_functions[] = {
@@ -49,15 +53,21 @@ PHP_MINIT_FUNCTION(uc)
     ZEND_INIT_MODULE_GLOBALS(uc, php_uc_init_globals, NULL);
     REGISTER_INI_ENTRIES();
 
-    rocksdb_options_t *options = rocksdb_options_create();
+    rocksdb_options_t *db_options = rocksdb_options_create();
+    rocksdb_options_t* cf_options = rocksdb_options_create();
 
     char *err = NULL;
 
-    rocksdb_options_set_create_if_missing(options, 1);
-    UC_G(db_handle) = rocksdb_open(options, UC_G(storage_directory), &err);
+    const char* cf_names[CF_COUNT] = {"default", "short", "long"};
+    const rocksdb_options_t* cf_opts[CF_COUNT] = {cf_options, cf_options, cf_options};
+    int ttls[CF_COUNT] = {0, TTL_SHORT, TTL_LONG};
+
+    rocksdb_options_set_create_if_missing(db_options, 1);
+
+    UC_G(db_handle) = rocksdb_open_column_families_with_ttl(db_options, UC_G(storage_directory), CF_COUNT, cf_names, cf_opts, UC_G(cf_handles), ttls, &err);
 
     if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Opening the database failed.");
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Opening the database failed: %s", err);
         return FAILURE;
     }
 
