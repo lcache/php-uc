@@ -1,3 +1,21 @@
+/*
+  +----------------------------------------------------------------------+
+  | APC                                                                  |
+  +----------------------------------------------------------------------+
+  | Copyright (c) 2015 The PHP Group                                     |
+  +----------------------------------------------------------------------+
+  | This source file is subject to version 3.01 of the PHP license,      |
+  | that is bundled with this package in the file LICENSE, and is        |
+  | available through the world-wide-web at the following url:           |
+  | http://www.php.net/license/3_01.txt                                  |
+  | If you did not receive a copy of the PHP license and are unable to   |
+  | obtain it through the world-wide-web, please send a note to          |
+  | license@php.net so we can mail you a copy immediately.               |
+  +----------------------------------------------------------------------+
+  | Authors: davidstrauss                                                |
+  +----------------------------------------------------------------------+
+ */
+
 #ifndef PHP_UC_H
 #define PHP_UC_H 1
 
@@ -9,9 +27,10 @@
 #include <pthread.h>
 
 ZEND_BEGIN_MODULE_GLOBALS(uc)
+    zend_bool enabled;
     char *storage_directory;
-    rocksdb_t *db_handle;
-    rocksdb_column_family_handle_t* cf_handles[3];
+    rocksdb_t *db_h;
+    rocksdb_column_family_handle_t* cfs_h[3];
     pthread_mutex_t counter_lock;
 ZEND_END_MODULE_GLOBALS(uc)
 
@@ -29,6 +48,9 @@ PHP_MSHUTDOWN_FUNCTION(uc);
 PHP_RINIT_FUNCTION(uc);
 
 PHP_FUNCTION(uc_test);
+PHP_FUNCTION(uc_clear_cache);
+PHP_FUNCTION(uc_store);
+PHP_FUNCTION(uc_fetch);
 
 extern zend_module_entry uc_module_entry;
 #define phpext_uc_prt &uc_module_entry

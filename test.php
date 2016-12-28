@@ -7,3 +7,30 @@
 // php -d extension=modules/uc.so test.php
 
 echo uc_test() . PHP_EOL;
+
+echo 'Old Value' . PHP_EOL;
+$retval = uc_fetch('mykey', $success);
+print_r($retval);
+echo 'uc_fetch: ' . $success . PHP_EOL;
+
+echo 'Old Value (Deleted?)' . PHP_EOL;
+$success = uc_clear_cache();
+echo 'uc_clear_cache: ' . $success . PHP_EOL;
+$retval = uc_fetch('mykey', $success);
+print_r($retval);
+echo 'uc_fetch: ' . $success . PHP_EOL;
+
+echo 'Simple Value' . PHP_EOL;
+$success = uc_store('mykey', 'myvalue');
+echo 'uc_store: ' . $success . PHP_EOL;
+$retval = uc_fetch('mykey', $success);
+echo 'Got: ' . $retval . PHP_EOL;
+echo 'uc_fetch: ' . $success . PHP_EOL;
+
+echo 'Complex Value' . PHP_EOL;
+$success = uc_store('mykey', ['i', 'am', 'complex']);
+echo 'uc_store: ' . $success . PHP_EOL;
+$retval = uc_fetch('mykey', $success);
+print_r($retval);
+echo 'uc_fetch: ' . $success . PHP_EOL;
+
