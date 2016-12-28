@@ -6,7 +6,8 @@ php:
     - nightly
 
 script:
+    - wget
     - phpize
-    - ./configure
+    - ./configure --enable-uc --with-rocksdb=./rocksdb/
     - make
 

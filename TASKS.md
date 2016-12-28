@@ -3,7 +3,8 @@
 * Build compaction filter for TTLs.
 * Filter for current TTLs at read time.
 * Build merge support for counters.
-* Add locks to support `uc_cas()` and `uc_add()`. Use TransactionDB?
+* Add unsafe implementations for `uc_cas()` and `uc_add()`.
+* Add locks to truly support `uc_cas()` and `uc_add()`. Use TransactionDB?
 * Add existing APCu tests.
 * Add option to clear DB at PHP startup.
 * Finish `.travis.yml`:
