@@ -168,7 +168,15 @@ time_t uc_time() {
 /* }}} */
 
 zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
+    if (val_len < sizeof(*meta)) {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Value (len %lu) is shorter than expected metadata (len %lu).", val_len, sizeof(*meta));
+        return 0;
+    }
     memcpy(meta, (void *) (val + val_len - sizeof(*meta)), sizeof(*meta));
+    if (meta->version > 1) {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Metadata (version %lu) exceeds known versions.", meta->version);
+        return 0;
+    }
     return 1;
 }
 
