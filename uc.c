@@ -39,6 +39,7 @@ static zend_function_entry uc_functions[] = {
     PHP_FE(uc_clear_cache, arginfo_uc_clear_cache)
     PHP_FE(uc_store, arginfo_uc_store)
     PHP_FE(uc_fetch, arginfo_uc_fetch)
+    PHP_FE(uc_delete, arginfo_uc_delete)
     {NULL, NULL, NULL}
 };
 
@@ -261,7 +262,7 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclus
     	            RETURN_TRUE;
                 }
     		} else {
-                php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_store expects key parameter to be a string or an array of key/value pairs.");
+                php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_store() expects key parameter to be a string or an array of key/value pairs.");
     		}
         }
 	}
@@ -294,6 +295,7 @@ zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
     unsigned char* val_s;
     size_t val_s_len;
 
+    // @TODO: Would this be faster/safer as a multiget?
     roptions = rocksdb_readoptions_create();
     for (int i = 0; i < CF_COUNT; i++) {
         val_s = (unsigned char *) rocksdb_get_cf(UC_G(db_h), roptions, UC_G(cfs_h)[i], ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
@@ -303,14 +305,19 @@ zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
     }
     rocksdb_readoptions_destroy(roptions);
 
-    const unsigned char *tmp = val_s;
+    // If a traversal through the CFs failed, then we missed everywhere.
+    if (val_s == NULL) {
+        ZVAL_NULL(*dst);
+        return 0;
+    }
 
+    const unsigned char *tmp = val_s;
     php_unserialize_data_t var_hash;
     PHP_VAR_UNSERIALIZE_INIT(var_hash);
     if(!php_var_unserialize(*dst, &tmp, val_s + val_s_len, &var_hash)) {
         PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
-        rocksdb_free(val_s);
         php_error_docref(NULL, E_NOTICE, "Error at offset %ld of %ld bytes", (zend_long)(tmp - val_s), (zend_long)val_s_len);
+        rocksdb_free(val_s);
         ZVAL_NULL(*dst);
         return 0;
     }
@@ -372,7 +379,7 @@ PHP_FUNCTION(uc_fetch) {
 					    add_assoc_zval(&result, Z_STRVAL_P(hentry), &result_entry);
 					}
 			    } else {
-                    php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch expects a string or array of strings.");
+                    php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch() expects a string or array of strings.");
 				}
 
 			    zend_hash_move_forward_ex(Z_ARRVAL_P(key), &hpos);
@@ -385,14 +392,98 @@ PHP_FUNCTION(uc_fetch) {
 			}
 		}
 	} else {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch expects a string or array of strings.");
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch() expects a string or array of strings.");
 		RETURN_FALSE;
 	}
     return;
 }
 /* }}} */
 
-// uc_delete
+/* {{{ uc_cache_delete */
+zend_bool uc_cache_delete(zend_string *key)
+{
+    char *err = NULL;
+    rocksdb_writeoptions_t* woptions;
+
+    // Create a batch that deletes the key from all CFs.
+    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
+    for (size_t i = 0; i < CF_COUNT; i++) {
+      rocksdb_writebatch_delete_cf(wb, UC_G(cfs_h)[i], ZSTR_VAL(key), ZSTR_LEN(key));
+    }
+
+    // Write the batch to storage.
+    woptions = rocksdb_writeoptions_create();
+    rocksdb_write(UC_G(db_h), woptions, wb, &err);
+    rocksdb_writeoptions_destroy(woptions);
+
+    rocksdb_writebatch_destroy(wb);
+
+    if (err != NULL) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to delete from user cache: %s", err);
+        return 0;
+    }
+
+    return 1;
+}
+/* }}} */
+
+
+/* {{{ proto mixed uc_delete(mixed keys)
+ */
+PHP_FUNCTION(uc_delete) {
+    zval *keys;
+
+    if (!UC_G(enabled)) {
+		RETURN_FALSE;
+	}
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &keys) == FAILURE) {
+        return;
+    }
+
+    if (Z_TYPE_P(keys) == IS_STRING) {
+        if (!Z_STRLEN_P(keys)) {
+			RETURN_FALSE;
+		}
+
+        if (uc_cache_delete(Z_STR_P(keys))) {
+            RETURN_TRUE;
+        } else {
+            RETURN_FALSE;
+        }
+
+    } else if (Z_TYPE_P(keys) == IS_ARRAY) {
+        HashPosition hpos;
+        zval *hentry;
+
+        array_init(return_value);
+        zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(keys), &hpos);
+
+        while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(keys), &hpos))) {
+            if (Z_TYPE_P(hentry) != IS_STRING) {
+                php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_delete() expects a string, array of strings, or UCIterator instance.");
+                add_next_index_zval(return_value, hentry);
+                Z_ADDREF_P(hentry);
+            } else if (uc_cache_delete(Z_STR_P(hentry)) != 1) {
+                add_next_index_zval(return_value, hentry);
+                Z_ADDREF_P(hentry);
+            }
+            zend_hash_move_forward_ex(Z_ARRVAL_P(keys), &hpos);
+        }
+    } else if (Z_TYPE_P(keys) == IS_OBJECT) {
+
+        // @TODO: Add iterator support.
+        //if (uc_iterator_delete(keys)) {
+        //    RETURN_TRUE;
+        //} else {
+            RETURN_FALSE;
+        //}
+    } else {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_delete() expects a string, array of strings, or UCIterator instance.");
+    }
+}
+/* }}} */
+
 // UCIterator
 
 // uc_inc

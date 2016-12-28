@@ -34,3 +34,10 @@ $retval = uc_fetch('mykey', $success);
 print_r($retval);
 echo 'uc_fetch: ' . $success . PHP_EOL;
 
+echo 'Deleted' . PHP_EOL;
+$success = uc_delete('mykey');
+echo 'uc_delete: ' . $success . PHP_EOL;
+$retval = uc_fetch('mykey', $success);
+print_r($retval);
+echo 'uc_fetch: ' . ($success ? true : false) . PHP_EOL;
+
