@@ -1,8 +1,8 @@
 * Fix `uc_clear_cache()`.
 * Finish `UCIterator`.
 * Build compaction filter for TTLs.
-* Filter for current TTLs at read time.
-* Build merge support for counters.
+* Filter expired items via `rocksdb_filterpolicy_create`.
+* Add countrer support via `rocksdb_mergeoperator_create`.
 * Add unsafe implementations for `uc_cas()` and `uc_add()`.
 * Add locks to truly support `uc_cas()` and `uc_add()`. Use TransactionDB?
 * Add existing APCu tests.
