@@ -1,4 +1,5 @@
-* Fix `uc_clear_cache()`.
+* Fix `uc_clear_cache()`, possibly with optimization:
+  https://github.com/facebook/rocksdb/wiki/Delete-A-Range-Of-Keys
 * Finish `UCIterator`.
 * Build compaction filter for TTLs.
 * Filter expired items via `rocksdb_filterpolicy_create`.
