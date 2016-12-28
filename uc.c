@@ -30,10 +30,6 @@
 #include "ext/standard/php_var.h"
 #include "SAPI.h"
 
-#define TTL_SHORT 3600
-#define TTL_LONG 86400
-#define CF_COUNT 3
-
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
 static zend_function_entry uc_functions[] = {
@@ -67,6 +63,20 @@ PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("uc.storage_directory", "/var/tmp/php-uc", PHP_INI_SYSTEM, OnUpdateString, storage_directory, zend_uc_globals, uc_globals)
 PHP_INI_END()
 
+typedef enum {
+    kPut = 0,
+    kInc = 1
+} uc_operation_t;
+
+typedef struct {
+    long counter_delta;
+    size_t ttl;
+    time_t created;
+    time_t modified;
+    uc_operation_t op;
+    size_t version;
+} uc_metadata_t;
+
 static void php_uc_init_globals(zend_uc_globals *uc_globals)
 {
 }
@@ -86,14 +96,15 @@ PHP_MINIT_FUNCTION(uc)
 
     char *err = NULL;
 
-    const char* cf_names[CF_COUNT] = {"default", "short", "long"};
-    const rocksdb_options_t* cf_opts[CF_COUNT] = {cf_options, cf_options, cf_options};
-    const int ttls[CF_COUNT] = {0, TTL_SHORT, TTL_LONG};
+    const char* cf_names[1] = {"default"};
+    const rocksdb_options_t* cf_opts[1] = {cf_options};
+    rocksdb_column_family_handle_t* cfs_h[1];
 
     rocksdb_options_set_create_if_missing(db_options, 1);
     rocksdb_options_set_create_missing_column_families(db_options, 1);
 
-    UC_G(db_h) = rocksdb_open_column_families_with_ttl(db_options, UC_G(storage_directory), CF_COUNT, cf_names, cf_opts, UC_G(cfs_h), ttls, &err);
+    UC_G(db_h) = rocksdb_open_column_families(db_options, UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
+    UC_G(cf_h) = cfs_h[0];
 
     if (err != NULL) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Opening the user cache database failed: %s", err);
@@ -135,9 +146,7 @@ PHP_FUNCTION(uc_clear_cache)
     // @TODO: Optimize to use rocksdb_delete_file_in_range_cf() first.
 
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    for (int i = 0; i < CF_COUNT; i++) {
-      rocksdb_writebatch_delete_range_cf(wb, UC_G(cfs_h)[i], "", 0, "", 0);
-    }
+    rocksdb_writebatch_delete_range_cf(wb, UC_G(cf_h), "", 0, "", 0);
     woptions = rocksdb_writeoptions_create();
     rocksdb_writeoptions_set_sync(woptions, 1);
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
@@ -158,46 +167,78 @@ time_t uc_time() {
 }
 /* }}} */
 
-/* {{{ uc_cache_store */
-zend_bool uc_cache_store(zend_string *key, const zval *val, const int32_t ttl, const zend_bool exclusive) {
-    // @TODO: Add support for exclusive mode.
+zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
+    memcpy(meta, (void *) (val + val_len - sizeof(*meta)), sizeof(*meta));
+    return 1;
+}
 
-    char *err = NULL;
-    rocksdb_writeoptions_t* woptions;
-    smart_str val_s = {0};
-    size_t cf_idx;
+void uc_print_metadata(const char *val, size_t val_len) {
+    uc_metadata_t meta;
+    uc_read_metadata(val, val_len, &meta);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "OP:  %d", meta.op);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TS:  %lu", meta.modified);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TTL: %lu", meta.ttl);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Version: %lu", meta.version);
+}
+
+zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
+    meta.version = 1;
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
+    smart_str_appendl(val, (const char *) &meta, sizeof(meta));
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
+    uc_print_metadata(ZSTR_VAL(val->s), ZSTR_LEN(val->s));
+    return 1;
+}
+
+zend_bool uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* meta) {
+    zend_bool status;
+
+    status = uc_read_metadata(val, *val_len, meta);
+    if (!status) {
+        return status;
+    }
+
+    val_len -= sizeof(*meta);
+
+    return 1;
+}
+
+/* {{{ uc_cache_store */
+zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const zend_bool exclusive) {
+    // @TODO: Add support for exclusive mode.
+    zend_bool status;
 
     // Serialize the incoming value: val -> val_s
+    smart_str val_s = {0};
     php_serialize_data_t var_hash;
     PHP_VAR_SERIALIZE_INIT(var_hash);
     php_var_serialize(&val_s, (zval*) val, &var_hash);
     PHP_VAR_SERIALIZE_DESTROY(var_hash);
 
-    // Choose a column family.
-    if (ttl == 0) {
-      cf_idx = 0;
-    } else if (ttl < TTL_LONG) {
-      cf_idx = 1;
-    } else {
-      // Even TTLs longer than TTL_LONG go into the last column family.
-      cf_idx = 2;
+    // Append metadata.
+    uc_metadata_t meta = {0};
+    meta.modified = uc_time();
+    meta.created = meta.modified;
+    meta.ttl = ttl;
+    meta.op = kPut;
+    status = uc_append_metadata(&val_s, meta);
+    if (!status) {
+        return status;
     }
 
     // Create a batch that writes the desired CF and deletes from the others.
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    for (size_t i = 0; i < CF_COUNT; i++) {
-      if (i == cf_idx) {
-        rocksdb_writebatch_put_cf(wb, UC_G(cfs_h)[i], ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
-      } else {
-        rocksdb_writebatch_delete_cf(wb, UC_G(cfs_h)[i], ZSTR_VAL(key), ZSTR_LEN(key));
-      }
-    }
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Next: rocksdb_writebatch_put_cf: %s", ZSTR_VAL(val_s.s));
+    rocksdb_writebatch_put_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Next: rocksdb_writeoptions_create");
 
     // Write the batch to storage.
+    char *err = NULL;
+    rocksdb_writeoptions_t* woptions;
     woptions = rocksdb_writeoptions_create();
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
     rocksdb_writeoptions_destroy(woptions);
-
     rocksdb_writebatch_destroy(wb);
     smart_str_free(&val_s);
 
@@ -291,34 +332,36 @@ PHP_FUNCTION(uc_add) {
 /* {{{ uc_cache_fetch */
 zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
 {
-    char *err = NULL;
+    char* err = NULL;
     rocksdb_readoptions_t* roptions;
     rocksdb_column_family_handle_t* cf_h;
-    unsigned char* val_s;
+    uc_metadata_t meta;
+    char* val_s;
     size_t val_s_len;
+    zend_bool status;
 
-    // @TODO: Would this be faster/safer as a multiget?
     roptions = rocksdb_readoptions_create();
-    for (int i = 0; i < CF_COUNT; i++) {
-        val_s = (unsigned char *) rocksdb_get_cf(UC_G(db_h), roptions, UC_G(cfs_h)[i], ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
-        if (val_s) {
-            break;
-        }
-    }
+    val_s = rocksdb_get_cf(UC_G(db_h), roptions, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
     rocksdb_readoptions_destroy(roptions);
 
-    // If a traversal through the CFs failed, then we missed everywhere.
+    // A NULL is a miss.
     if (val_s == NULL) {
         ZVAL_NULL(*dst);
         return 0;
     }
 
-    const unsigned char *tmp = val_s;
+    // Parse metadata.
+    status = uc_strip_metadata(val_s, &val_s_len, &meta);
+    if (!status) {
+        return status;
+    }
+
+    const unsigned char *tmp = (unsigned char *) val_s;
     php_unserialize_data_t var_hash;
     PHP_VAR_UNSERIALIZE_INIT(var_hash);
-    if(!php_var_unserialize(*dst, &tmp, val_s + val_s_len, &var_hash)) {
+    if(!php_var_unserialize(*dst, &tmp, (unsigned char *) val_s + val_s_len, &var_hash)) {
         PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
-        php_error_docref(NULL, E_NOTICE, "Error at offset %ld of %ld bytes", (zend_long)(tmp - val_s), (zend_long)val_s_len);
+        php_error_docref(NULL, E_NOTICE, "Error at offset %ld of %ld bytes", (zend_long)(tmp - (unsigned char *) val_s), (zend_long)val_s_len);
         rocksdb_free(val_s);
         ZVAL_NULL(*dst);
         return 0;
@@ -407,17 +450,11 @@ zend_bool uc_cache_delete(zend_string *key)
     char *err = NULL;
     rocksdb_writeoptions_t* woptions;
 
-    // Create a batch that deletes the key from all CFs.
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    for (size_t i = 0; i < CF_COUNT; i++) {
-      rocksdb_writebatch_delete_cf(wb, UC_G(cfs_h)[i], ZSTR_VAL(key), ZSTR_LEN(key));
-    }
-
-    // Write the batch to storage.
+    rocksdb_writebatch_delete_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key));
     woptions = rocksdb_writeoptions_create();
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
     rocksdb_writeoptions_destroy(woptions);
-
     rocksdb_writebatch_destroy(wb);
 
     if (err != NULL) {

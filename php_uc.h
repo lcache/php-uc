@@ -28,9 +28,9 @@
 
 ZEND_BEGIN_MODULE_GLOBALS(uc)
     zend_bool enabled;
-    char *storage_directory;
-    rocksdb_t *db_h;
-    rocksdb_column_family_handle_t* cfs_h[3];
+    char* storage_directory;
+    rocksdb_t* db_h;
+    rocksdb_column_family_handle_t* cf_h;
     pthread_mutex_t counter_lock;
 ZEND_END_MODULE_GLOBALS(uc)
 

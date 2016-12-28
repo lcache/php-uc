@@ -41,3 +41,7 @@ $retval = uc_fetch('mykey', $success);
 print_r($retval);
 echo 'uc_fetch: ' . ($success ? true : false) . PHP_EOL;
 
+echo 'Storing again' . PHP_EOL;
+$success = uc_store('mykey', ['i', 'am', 'complex']);
+echo 'uc_store: ' . $success . PHP_EOL;
+
