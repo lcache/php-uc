@@ -34,6 +34,7 @@ ZEND_DECLARE_MODULE_GLOBALS(uc)
 
 static zend_function_entry uc_functions[] = {
     PHP_FE(uc_test, NULL)
+    PHP_FE(uc_compact, NULL)
     PHP_FE(uc_clear_cache, arginfo_uc_clear_cache)
     PHP_FE(uc_store, arginfo_uc_store)
     PHP_FE(uc_fetch, arginfo_uc_fetch)
@@ -63,6 +64,8 @@ PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("uc.storage_directory", "/var/tmp/php-uc", PHP_INI_SYSTEM, OnUpdateString, storage_directory, zend_uc_globals, uc_globals)
 PHP_INI_END()
 
+#define UC_MAGIC 19840311
+
 typedef enum {
     kPut = 0,
     kInc = 1
@@ -75,6 +78,7 @@ typedef struct {
     time_t modified;
     uc_operation_t op;
     size_t version;
+    uint32_t magic;
 } uc_metadata_t;
 
 static void php_uc_init_globals(zend_uc_globals *uc_globals)
@@ -86,22 +90,87 @@ PHP_RINIT_FUNCTION(uc)
     return SUCCESS;
 }
 
+zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
+    // @TODO: Move errors to a *err parameter.
+    if (val_len < sizeof(*meta)) {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Value (len %lu) is shorter than expected metadata (len %lu).", val_len, sizeof(*meta));
+        return 0;
+    }
+
+    // Copy metadata into the struct.
+    memcpy(meta, (void *) (val + val_len - sizeof(*meta)), sizeof(*meta));
+
+    if (meta->magic != UC_MAGIC) {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Magic number (%lu) does not match expected value (%lu).", meta->magic, UC_MAGIC);
+        return 0;
+    }
+
+    if (meta->version > 1) {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Metadata (version %lu) exceeds known versions.", meta->version);
+        return 0;
+    }
+    return 1;
+}
+
+zend_bool uc_metadata_is_fresh(uc_metadata_t meta, time_t now) {
+    // Entries with no TTL are always fresh.
+    if (meta.ttl == 0) {
+        return 1;
+    }
+
+    // Entries with a TTL of 1984 should go down the memory hole.
+    if (meta.ttl == 1984) {
+        return 0;
+    }
+
+    // Check the time elapsed since last modification.
+    if (meta.modified + meta.ttl >= now) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static void uc_filter_destory(void* arg) {}
+static const char* uc_filter_name(void* arg) { return "uc"; }
+static unsigned char uc_filter_filter(void* arg, int level, const char* key, size_t key_length, const char* existing_value, size_t value_length, char** new_value, size_t* new_value_length, unsigned char* value_changed) {
+    uc_metadata_t meta;
+    zend_bool status_ok;
+
+    status_ok = uc_read_metadata(existing_value, value_length, &meta);
+    // Keep entries on parsing failure.
+    if (!status_ok) {
+        return 0;
+    }
+
+    // Prune stale entries with TTLs.
+    if (!uc_metadata_is_fresh(meta, time(NULL))) {
+        return 1;
+    }
+
+    return 0;
+}
+
 PHP_MINIT_FUNCTION(uc)
 {
     ZEND_INIT_MODULE_GLOBALS(uc, php_uc_init_globals, NULL);
     REGISTER_INI_ENTRIES();
 
-    rocksdb_options_t *db_options = rocksdb_options_create();
+    char* err = NULL;
+
+    rocksdb_options_t* db_options = rocksdb_options_create();
     rocksdb_options_t* cf_options = rocksdb_options_create();
-
-    char *err = NULL;
-
+    rocksdb_compactionfilter_t* cfilter;
     const char* cf_names[1] = {"default"};
     const rocksdb_options_t* cf_opts[1] = {cf_options};
     rocksdb_column_family_handle_t* cfs_h[1];
 
     rocksdb_options_set_create_if_missing(db_options, 1);
     rocksdb_options_set_create_missing_column_families(db_options, 1);
+
+    // Apply the TTL-based compaction filter.
+    cfilter = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
+    rocksdb_options_set_compaction_filter(db_options, cfilter);
 
     UC_G(db_h) = rocksdb_open_column_families(db_options, UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
     UC_G(cf_h) = cfs_h[0];
@@ -122,6 +191,7 @@ PHP_MSHUTDOWN_FUNCTION(uc)
     UNREGISTER_INI_ENTRIES();
 
     // @TODO: Properly free memory for CFs and DB.
+    // rocksdb_compactionfilter_destroy
     // rocksdb_column_family_handle_destroy
     // rocksdb_close
 
@@ -132,6 +202,14 @@ PHP_FUNCTION(uc_test)
 {
     RETURN_STRING("UC Test");
 }
+
+/* {{{ proto void uc_compact() */
+PHP_FUNCTION(uc_compact)
+{
+    rocksdb_compact_range_cf(UC_G(db_h), UC_G(cf_h), NULL, 0, NULL, 0);
+    RETURN_TRUE;
+}
+/* }}} */
 
 /* {{{ proto void uc_clear_cache() */
 PHP_FUNCTION(uc_clear_cache)
@@ -146,7 +224,7 @@ PHP_FUNCTION(uc_clear_cache)
     // @TODO: Optimize to use rocksdb_delete_file_in_range_cf() first.
 
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    rocksdb_writebatch_delete_range_cf(wb, UC_G(cf_h), "", 0, "", 0);
+    rocksdb_writebatch_delete_range_cf(wb, UC_G(cf_h), NULL, 0, NULL, 0);
     woptions = rocksdb_writeoptions_create();
     rocksdb_writeoptions_set_sync(woptions, 1);
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
@@ -161,36 +239,24 @@ PHP_FUNCTION(uc_clear_cache)
 }
 /* }}} */
 
-/* {{{ uc_time */
-time_t uc_time() {
-  return (time_t) sapi_get_request_time();
-}
-/* }}} */
-
-zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
-    if (val_len < sizeof(*meta)) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Value (len %lu) is shorter than expected metadata (len %lu).", val_len, sizeof(*meta));
-        return 0;
-    }
-    memcpy(meta, (void *) (val + val_len - sizeof(*meta)), sizeof(*meta));
-    if (meta->version > 1) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Metadata (version %lu) exceeds known versions.", meta->version);
-        return 0;
-    }
-    return 1;
-}
-
 void uc_print_metadata(const char *val, size_t val_len) {
     uc_metadata_t meta;
     uc_read_metadata(val, val_len, &meta);
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "OP:  %d", meta.op);
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TS:  %lu", meta.modified);
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TTL: %lu", meta.ttl);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Version: %lu", meta.version);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "VER: %lu", meta.version);
 }
+
+/* {{{ uc_time */
+time_t uc_time() {
+  return (time_t) sapi_get_request_time();
+}
+/* }}} */
 
 zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
     meta.version = 1;
+    meta.magic = UC_MAGIC;
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
     smart_str_appendl(val, (const char *) &meta, sizeof(meta));
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
@@ -364,6 +430,12 @@ zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
         return status;
     }
 
+    // Miss on stale data. No need to explicitly delete;
+    // the next compaction will handle deleting stale data.
+    if (!uc_metadata_is_fresh(meta, uc_time())) {
+        return 0;
+    }
+
     const unsigned char *tmp = (unsigned char *) val_s;
     php_unserialize_data_t var_hash;
     PHP_VAR_UNSERIALIZE_INIT(var_hash);
@@ -532,7 +604,6 @@ PHP_FUNCTION(uc_delete) {
 /* }}} */
 
 // UCIterator
-
 // uc_inc
 // uc_dec
 // uc_cas

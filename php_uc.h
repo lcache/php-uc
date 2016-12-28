@@ -48,6 +48,7 @@ PHP_MSHUTDOWN_FUNCTION(uc);
 PHP_RINIT_FUNCTION(uc);
 
 PHP_FUNCTION(uc_test);
+PHP_FUNCTION(uc_compact);
 PHP_FUNCTION(uc_clear_cache);
 PHP_FUNCTION(uc_store);
 PHP_FUNCTION(uc_fetch);

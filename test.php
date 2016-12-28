@@ -41,6 +41,14 @@ $retval = uc_fetch('mykey', $success);
 print_r($retval);
 echo 'uc_fetch: ' . ($success ? true : false) . PHP_EOL;
 
+echo 'TTL' . PHP_EOL;
+$success = uc_store('mykey', 'myvalue', 1984);
+echo 'uc_store: ' . $success . PHP_EOL;
+uc_compact();
+$retval = uc_fetch('mykey', $success);
+echo 'Got: ' . $retval . PHP_EOL;
+echo 'uc_fetch (should fail): ' . $success . PHP_EOL;
+
 echo 'Storing again' . PHP_EOL;
 $success = uc_store('mykey', ['i', 'am', 'complex']);
 echo 'uc_store: ' . $success . PHP_EOL;
