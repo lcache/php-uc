@@ -7,8 +7,8 @@
 * Add locks to truly support `uc_cas()` and `uc_add()`. Use TransactionDB?
 * Add existing APCu tests.
 * Add option to clear DB at PHP startup.
-* Use write_option.disableWAL and write a telltale value on clean shutdown.
-  Clear the full DB on startup if the value is missing.
+* Use `rocksdb_writeoptions_disable_WAL` and write a telltale value on clean
+  shutdown. Clear the full DB on startup if the value is missing.
 * Get static linking to RocksDB working.
 * Finish `.travis.yml`:
 
