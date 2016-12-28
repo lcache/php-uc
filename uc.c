@@ -12,9 +12,9 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Authors: Daniel Cowgill <dcowgill@communityconnect.com>              |
+  | Authors: David Strauss <david@davidstrauss.net>                      |
   |          Rasmus Lerdorf <rasmus@php.net>                             |
-  |          David Strauss <david@davidstrauss.net>                      |
+  |          Daniel Cowgill <dcowgill@communityconnect.com>              |
   +----------------------------------------------------------------------+
  */
 

@@ -12,7 +12,8 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Authors: krakjoe, davidstrauss                                       |
+  | Authors: David Strauss <david@davidstrauss.net>                      |
+  |          Joe Watkins <krakjoe@php.net>                               |
   +----------------------------------------------------------------------+
  */
 
