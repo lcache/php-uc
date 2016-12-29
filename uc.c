@@ -352,6 +352,7 @@ PHP_MINIT_FUNCTION(uc)
 
     char* err = NULL;
 
+    rocksdb_mergeoperator_t* merge_op;
     const char* cf_names[1] = {"default"};
     const rocksdb_options_t* cf_opts[1];
     rocksdb_column_family_handle_t* cfs_h[1];
@@ -370,8 +371,8 @@ PHP_MINIT_FUNCTION(uc)
     rocksdb_options_set_compaction_filter(UC_G(cf_options), UC_G(cfilter));
 
     // Apply the merge operator.
-    UC_G(merge_op) = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
-    rocksdb_options_set_merge_operator(UC_G(cf_options), UC_G(merge_op));
+    merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
+    rocksdb_options_set_merge_operator(UC_G(cf_options), merge_op);
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
 
@@ -396,9 +397,8 @@ PHP_MSHUTDOWN_FUNCTION(uc)
     rocksdb_column_family_handle_destroy(UC_G(cf_h));
     rocksdb_close(UC_G(db_h));
     rocksdb_options_destroy(UC_G(db_options));
+    //rocksdb_compactionfilter_destroy(UC_G(cfilter));
     rocksdb_options_destroy(UC_G(cf_options));
-    rocksdb_compactionfilter_destroy(UC_G(cfilter));
-    rocksdb_mergeoperator_destroy(UC_G(merge_op));
 
     return SUCCESS;
 }

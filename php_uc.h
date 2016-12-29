@@ -32,7 +32,6 @@ ZEND_BEGIN_MODULE_GLOBALS(uc)
     rocksdb_options_t* db_options;
     rocksdb_options_t* cf_options;
     rocksdb_compactionfilter_t* cfilter;
-    rocksdb_mergeoperator_t* merge_op;
     rocksdb_column_family_handle_t* cf_h;
 ZEND_END_MODULE_GLOBALS(uc)
 
