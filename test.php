@@ -53,3 +53,14 @@ echo 'Storing again' . PHP_EOL;
 $success = uc_store('mykey', ['i', 'am', 'complex']);
 echo 'uc_store: ' . $success . PHP_EOL;
 
+echo 'Counters' . PHP_EOL;
+$success = uc_store('myinitcount', 5);
+echo 'uc_store: ' . $success . PHP_EOL;
+$success = uc_inc('myinitcount', 2);
+echo 'uc_inc: ' . $success . PHP_EOL;
+$success = uc_inc('myinitcount', 2);
+echo 'uc_inc: ' . $success . PHP_EOL;
+$retval = uc_fetch('myinitcount', $success);
+echo 'Got: ' . $retval . PHP_EOL;
+echo 'uc_fetch: ' . $success . PHP_EOL;
+

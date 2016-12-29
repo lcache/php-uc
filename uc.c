@@ -37,6 +37,9 @@ static zend_function_entry uc_functions[] = {
     PHP_FE(uc_compact, NULL)
     PHP_FE(uc_clear_cache, arginfo_uc_clear_cache)
     PHP_FE(uc_store, arginfo_uc_store)
+    PHP_FE(uc_inc, arginfo_uc_inc)
+    PHP_FE(uc_cas, arginfo_uc_cas)
+    PHP_FE(uc_add, arginfo_uc_store)
     PHP_FE(uc_fetch, arginfo_uc_fetch)
     PHP_FE(uc_delete, arginfo_uc_delete)
     {NULL, NULL, NULL}
@@ -69,7 +72,8 @@ PHP_INI_END()
 typedef enum {
     kPut = 0,
     kInc = 1,
-    kCAS = 2
+    kAdd = 2,
+    kCAS = 3
 } uc_operation_t;
 
 typedef enum {
@@ -81,9 +85,7 @@ typedef enum {
 typedef struct {
     uc_value_type_t value_type;
     zend_long value;
-    uc_value_type_t cas_type;
-    zend_ulong cas_hash;
-    zend_long cas_value;
+    zend_long cas_value_or_inc;
     size_t ttl;
     time_t created;
     time_t modified;
@@ -121,12 +123,27 @@ zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta)
         return 0;
     }
 
-    if (meta->op == kInc && meta->value_type != kLong) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Increment operation has invalid value type: %lu", meta->value_type);
-        return 0;
+    if ((meta->op == kInc || meta->op == kCAS)) {
+        if (meta->value_type != kLong) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc, Dec, or CAS operation has non-long value type: %lu", meta->value_type);
+            return 0;
+        }
+        if (val_len > sizeof(*meta)) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc, Dec, or CAS operation has extra bytes: %lu", val_len - sizeof(*meta));
+            return 0;
+        }
     }
 
     return 1;
+}
+
+void uc_print_metadata(const char *val, size_t val_len) {
+    uc_metadata_t meta;
+    uc_read_metadata(val, val_len, &meta);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "OP:  %d", meta.op);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TS:  %lu", meta.modified);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TTL: %lu", meta.ttl);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "VER: %lu", meta.version);
 }
 
 zend_bool uc_metadata_is_fresh(uc_metadata_t meta, time_t now) {
@@ -182,15 +199,6 @@ zend_bool uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* met
     return 1;
 }
 
-void uc_print_metadata(const char *val, size_t val_len) {
-    uc_metadata_t meta;
-    uc_read_metadata(val, val_len, &meta);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "OP:  %d", meta.op);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TS:  %lu", meta.modified);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TTL: %lu", meta.ttl);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "VER: %lu", meta.version);
-}
-
 zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
     meta.version = 1;
     meta.magic = UC_MAGIC;
@@ -222,7 +230,7 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
         }
     }
 
-    // In the degenerate case of no operands, return the original value.
+    // In the degenerate case of no operands, succeed and return the original value.
     *success = 1;
     new_data = existing_value;
     new_data_len = existing_value_length;
@@ -239,26 +247,31 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
 
         if (meta.op == kInc) {
             meta.value_type = kLong;
-            meta.value += merge_op_meta.value;
+            meta.value += merge_op_meta.cas_value_or_inc;
             meta.modified = merge_op_meta.modified;
             if (!meta.created) {
                 meta.created = meta.modified;
             }
+
+            // Counters never have anything outside metadata.
             new_data = NULL;
             new_data_len = 0;
         }
-        else if (meta.op == kCAS && meta.value_type == merge_op_meta.cas_type) {
-            // Case one: Compare against an existing long value.
-            if (merge_op_meta.cas_type == kLong && meta.value == merge_op_meta.cas_value) {
-                meta = merge_op_meta;
-                new_data = NULL;
-                new_data_len = 0;
-            }
-            // Case two: Compare against an existing serialized value.
-            else if (merge_op_meta.cas_type == kSerialized && zend_inline_hash_func(existing_value, existing_value_length) == merge_op_meta.cas_hash) {
+        else if (meta.op == kAdd) {
+            if (existing_value == NULL) {
                 meta = merge_op_meta;
                 new_data = operands_list[i];
-                new_data_len = operands_list_length[i] - sizeof(meta);
+                new_data_len = operands_list_length[i];
+            }
+        }
+        else if (meta.op == kCAS) {
+            // Compare. If the expected value is the current one, replace it.
+            if (meta.value_type == kLong && meta.value == merge_op_meta.cas_value_or_inc) {
+                meta = merge_op_meta;
+
+                // CAS values never have anything outside metadata.
+                new_data = NULL;
+                new_data_len = 0;
             }
         } else {
             // Unexpected value for meta.op.
@@ -418,31 +431,15 @@ time_t uc_time() {
 /* }}} */
 
 /* {{{ uc_cache_store */
-zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const zend_bool exclusive, const zval *cas_original) {
+zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc_operation_t op, const zend_long cas_value_or_inc) {
     zend_bool status;
     uc_metadata_t meta = {0};
     smart_str val_s = {0};
 
-    // CAS Value: Store longs natively. Otherwise, serialize and hash.
-    if (exclusive) {
-        meta.op = kCAS;
-        if (cas_original == NULL) {
-            meta.cas_type = kNone;
-        }
-        else if (Z_TYPE_P(cas_original) == IS_LONG) {
-            meta.cas_type = kLong;
-            meta.cas_value = Z_LVAL_P(cas_original);
-        } else {
-            meta.cas_type = kSerialized;
-            smart_str cas_s = {0};
-            php_serialize_data_t var_hash;
-            PHP_VAR_SERIALIZE_INIT(var_hash);
-            php_var_serialize(&cas_s, (zval*) cas_original, &var_hash);
-            PHP_VAR_SERIALIZE_DESTROY(var_hash);
-            meta.cas_hash = zend_inline_hash_func(ZSTR_VAL(cas_s.s), ZSTR_LEN(cas_s.s));
-        }
-    } else {
-        meta.op = kPut;
+    meta.op = op;
+
+    if (meta.op == kCAS) {
+        meta.cas_value_or_inc = cas_value_or_inc;
     }
 
     // Value: Store longs natively. Otherwise, serialize.
@@ -457,11 +454,14 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
     }
 
+    if (meta.op == kCAS && meta.value_type != kLong) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Trying to write a CAS operation with a non-long value.");
+    }
+
     // Append other metadata.
     meta.modified = uc_time();
     meta.created = meta.modified;
     meta.ttl = ttl;
-    meta.op = kPut;
     status = uc_append_metadata(&val_s, meta);
     if (!status) {
         return status;
@@ -498,7 +498,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
 
 /* {{{ uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclusive)
  */
-static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclusive, const zval *cas_original)
+static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const uc_operation_t op)
 {
     // @TODO: Add RocksDB batch support for array writes.
     zval *key = NULL;
@@ -530,7 +530,7 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclus
 		    zend_hash_internal_pointer_reset_ex(hash, &hpos);
 		    while((hentry = zend_hash_get_current_data_ex(hash, &hpos))) {
 		        if (zend_hash_get_current_key_ex(hash, &hkey, &hkey_idx, &hpos) == HASH_KEY_IS_STRING) {
-		            if(!uc_cache_store(hkey, hentry, (uint32_t) ttl, exclusive, cas_original)) {
+		            if(!uc_cache_store(hkey, hentry, (uint32_t) ttl, op, 0)) {
 		                add_assoc_long_ex(return_value, hkey->val, hkey->len, -1);  /* -1: insertion error */
 		            }
 		        } else {
@@ -546,7 +546,7 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclus
     	            RETURN_FALSE;
     	        }
                 /* return true on success */
-    			if(uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, exclusive, cas_original)) {
+    			if(uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, op, 0)) {
     	            RETURN_TRUE;
                 }
     		} else {
@@ -563,14 +563,66 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclus
 /* {{{ proto int uc_store(mixed key, mixed var [, long ttl ])
  */
 PHP_FUNCTION(uc_store) {
-    uc_store_helper(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0, NULL);
+    uc_store_helper(INTERNAL_FUNCTION_PARAM_PASSTHRU, kPut);
 }
 /* }}} */
 
 /* {{{ proto int uc_add(mixed key, mixed var [, long ttl ])
  */
 PHP_FUNCTION(uc_add) {
-    uc_store_helper(INTERNAL_FUNCTION_PARAM_PASSTHRU, 1, NULL);
+    uc_store_helper(INTERNAL_FUNCTION_PARAM_PASSTHRU, kAdd);
+}
+/* }}} */
+
+/* {{{ proto long apc_inc(string key [, long step [, bool& success]])
+ */
+PHP_FUNCTION(uc_inc) {
+    zend_string *key;
+    zend_long step = 1;
+    zval *success = NULL;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
+        return;
+    }
+
+	if (success) {
+		ZVAL_DEREF(success);
+		zval_ptr_dtor(success);
+	}
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_inc(%d)", step);
+    if (uc_cache_store(key, NULL, 0, kInc, step)) {
+        if (success) {
+			ZVAL_TRUE(success);
+		}
+    }
+
+    if (success) {
+		ZVAL_FALSE(success);
+	}
+
+    RETURN_FALSE;
+}
+/* }}} */
+
+/* {{{ proto int apc_cas(string key, int old, int new)
+ */
+PHP_FUNCTION(uc_cas) {
+    zend_string *key;
+    zend_long vals[2];
+    zval *new;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sll", &key, &vals[0], &vals[1]) == FAILURE) {
+        return;
+    }
+
+    ZVAL_LONG(new, vals[1]);
+
+    if (uc_cache_store(key, new, 0, kCAS, vals[0])) {
+		RETURN_TRUE;
+	}
+
+    RETURN_FALSE;
 }
 /* }}} */
 
@@ -787,7 +839,4 @@ PHP_FUNCTION(uc_delete) {
 /* }}} */
 
 // UCIterator
-// uc_inc
-// uc_dec
-// uc_cas
 

@@ -53,6 +53,9 @@ PHP_FUNCTION(uc_clear_cache);
 PHP_FUNCTION(uc_store);
 PHP_FUNCTION(uc_fetch);
 PHP_FUNCTION(uc_delete);
+PHP_FUNCTION(uc_inc);
+PHP_FUNCTION(uc_add);
+PHP_FUNCTION(uc_cas);
 
 extern zend_module_entry uc_module_entry;
 #define phpext_uc_prt &uc_module_entry
