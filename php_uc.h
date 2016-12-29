@@ -24,14 +24,16 @@
 #endif
 
 #include <rocksdb/c.h>
-#include <pthread.h>
 
 ZEND_BEGIN_MODULE_GLOBALS(uc)
     zend_bool enabled;
     char* storage_directory;
     rocksdb_t* db_h;
+    rocksdb_options_t* db_options;
+    rocksdb_options_t* cf_options;
+    rocksdb_compactionfilter_t* cfilter;
+    rocksdb_mergeoperator_t* merge_op;
     rocksdb_column_family_handle_t* cf_h;
-    pthread_mutex_t counter_lock;
 ZEND_END_MODULE_GLOBALS(uc)
 
 #ifdef ZTS

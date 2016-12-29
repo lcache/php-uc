@@ -352,30 +352,30 @@ PHP_MINIT_FUNCTION(uc)
 
     char* err = NULL;
 
-    rocksdb_options_t* db_options = rocksdb_options_create();
-    rocksdb_options_t* cf_options = rocksdb_options_create();
-    rocksdb_compactionfilter_t* cfilter;
-    rocksdb_mergeoperator_t* merge_op;
     const char* cf_names[1] = {"default"};
-    const rocksdb_options_t* cf_opts[1] = {cf_options};
+    const rocksdb_options_t* cf_opts[1];
     rocksdb_column_family_handle_t* cfs_h[1];
 
-    rocksdb_options_set_create_if_missing(db_options, 1);
-    rocksdb_options_set_create_missing_column_families(db_options, 1);
-    rocksdb_options_set_compression(db_options, /* rocksdb::kSnappyCompression */ 0x1);
-    rocksdb_options_set_info_log_level(db_options, /* InfoLogLevel::DEBUG_LEVEL */ 2);
+    UC_G(db_options) = rocksdb_options_create();
+    UC_G(cf_options) = rocksdb_options_create();
+    cf_opts[0] = UC_G(cf_options);
+
+    rocksdb_options_set_create_if_missing(UC_G(db_options), 1);
+    rocksdb_options_set_create_missing_column_families(UC_G(db_options), 1);
+    rocksdb_options_set_compression(UC_G(db_options), /* rocksdb::kSnappyCompression */ 0x1);
+    rocksdb_options_set_info_log_level(UC_G(db_options), /* InfoLogLevel::DEBUG_LEVEL */ 2);
 
     // Apply the TTL-enforcing compaction filter.
-    cfilter = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
-    rocksdb_options_set_compaction_filter(cf_options, cfilter);
+    UC_G(cfilter) = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
+    rocksdb_options_set_compaction_filter(UC_G(cf_options), UC_G(cfilter));
 
     // Apply the merge operator.
-    merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
-    rocksdb_options_set_merge_operator(cf_options, merge_op);
+    UC_G(merge_op) = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
+    rocksdb_options_set_merge_operator(UC_G(cf_options), UC_G(merge_op));
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
 
-    UC_G(db_h) = rocksdb_open_column_families(db_options, UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
+    UC_G(db_h) = rocksdb_open_column_families(UC_G(db_options), UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
     UC_G(cf_h) = cfs_h[0];
 
     if (err != NULL) {
@@ -393,11 +393,12 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 {
     UNREGISTER_INI_ENTRIES();
 
-    // @TODO: Properly free memory for CFs and DB.
-    // rocksdb_compactionfilter_destroy
-    // rocksdb_mergeoperator_destroy
-    // rocksdb_column_family_handle_destroy
-    // rocksdb_close
+    rocksdb_column_family_handle_destroy(UC_G(cf_h));
+    rocksdb_close(UC_G(db_h));
+    rocksdb_options_destroy(UC_G(db_options));
+    rocksdb_options_destroy(UC_G(cf_options));
+    rocksdb_compactionfilter_destroy(UC_G(cfilter));
+    rocksdb_mergeoperator_destroy(UC_G(merge_op));
 
     return SUCCESS;
 }
