@@ -362,6 +362,7 @@ PHP_MINIT_FUNCTION(uc)
     cf_opts[0] = UC_G(cf_options);
 
     rocksdb_options_set_create_if_missing(UC_G(db_options), 1);
+    rocksdb_options_set_use_adaptive_mutex(UC_G(db_options), 1);
     rocksdb_options_set_create_missing_column_families(UC_G(db_options), 1);
     rocksdb_options_set_compression(UC_G(db_options), /* rocksdb::kSnappyCompression */ 0x1);
     //rocksdb_options_set_info_log_level(UC_G(db_options), /* InfoLogLevel::DEBUG_LEVEL */ 2);
@@ -435,7 +436,7 @@ PHP_FUNCTION(uc_clear_cache)
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
     rocksdb_writebatch_delete_range_cf(wb, UC_G(cf_h), NULL, 0, NULL, 0);
     woptions = rocksdb_writeoptions_create();
-    rocksdb_writeoptions_disable_WAL(woptions, 1);
+    //rocksdb_writeoptions_disable_WAL(woptions, 1);
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
     rocksdb_writeoptions_destroy(woptions);
 
@@ -522,7 +523,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     char *err = NULL;
     rocksdb_writeoptions_t* woptions;
     woptions = rocksdb_writeoptions_create();
-    rocksdb_writeoptions_disable_WAL(woptions, 1);
+    //rocksdb_writeoptions_disable_WAL(woptions, 1);
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
 
     // Clean up.
@@ -816,7 +817,7 @@ zend_bool uc_cache_delete(zend_string *key)
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
     rocksdb_writebatch_delete_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key));
     woptions = rocksdb_writeoptions_create();
-    rocksdb_writeoptions_disable_WAL(woptions, 1);
+    //rocksdb_writeoptions_disable_WAL(woptions, 1);
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
     rocksdb_writeoptions_destroy(woptions);
     rocksdb_writebatch_destroy(wb);

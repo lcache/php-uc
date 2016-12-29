@@ -1,3 +1,4 @@
+* Move DB initialization later so it runs after PHP-FPM drops privileges.
 * Fix `uc_clear_cache()`, possibly with optimization:
   https://github.com/facebook/rocksdb/wiki/Delete-A-Range-Of-Keys
 * Finish `UCIterator`.

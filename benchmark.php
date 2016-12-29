@@ -36,7 +36,7 @@ function show_fragmentation()
 echo 'Writing, reading, and deleting test data...' . PHP_EOL;
 
 
-$db = new PDO('sqlite:/tmp/php-uc.sqlite');
+$db = new PDO('sqlite:/var/tmp/php-uc.sqlite');
 $db->exec('CREATE TABLE uc (address TEXT PRIMARY KEY, data TEXT)');
 $store = $db->prepare('INSERT INTO uc (address, data) VALUES (:address, :data)');
 $fetch = $db->prepare('SELECT data FROM uc WHERE address = :address');
@@ -58,25 +58,25 @@ for ($i = 0; $i < OPS; $i++) {
         $value = str_repeat('abcdefgh', $size);
         $bytes += $size * 8;
         //apcu_store('key' . $key, $value);
-        //uc_store('key' . $key, $value);
+        uc_store('key' . $key, $value);
         //$memcache_obj->set('key' . $key, $value);
-        $store->bindValue(':address', 'key' . $key);
-        $store->bindValue(':data', $value);
-        $store->execute();
+        //$store->bindValue(':address', 'key' . $key);
+        //$store->bindValue(':data', $value);
+        //$store->execute();
     }
     else if ($op >= 5 && $op < 9) {
         //apcu_fetch('key' . $key);
-        //uc_fetch('key' . $key);
+        uc_fetch('key' . $key);
         //$memcache_obj->get('key' . $key);
-        $fetch->bindValue(':address', 'key' . $key);
-        $fetch->execute();
+        //$fetch->bindValue(':address', 'key' . $key);
+        //$fetch->execute();
     }
     else {
         //apcu_delete('key' . $key);
-        //uc_delete('key' . $key);
+        uc_delete('key' . $key);
         //$memcache_obj->delete('key' . $key);
-        $delete->bindValue(':address', 'key' . $key);
-        $delete->execute();
+        //$delete->bindValue(':address', 'key' . $key);
+        //$delete->execute();
     }
 }
 
