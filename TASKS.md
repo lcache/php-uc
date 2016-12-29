@@ -3,9 +3,8 @@
 * Finish `UCIterator`.
 * Build compaction filter for TTLs.
 * Filter expired items via `rocksdb_filterpolicy_create`.
-* Add countrer support via `rocksdb_mergeoperator_create`.
-* Add unsafe implementations for `uc_cas()` and `uc_add()`.
-* Add locks to truly support `uc_cas()` and `uc_add()`. Use TransactionDB?
+* Add counter support via `rocksdb_mergeoperator_create`.
+* Use merge operator plus a read for `uc_cas()` and `uc_add()`.
 * Add existing APCu tests.
 * Add option to clear DB at PHP startup.
 * Use `rocksdb_writeoptions_disable_WAL` and write a telltale value on clean
