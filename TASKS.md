@@ -1,10 +1,6 @@
 * Fix `uc_clear_cache()`, possibly with optimization:
   https://github.com/facebook/rocksdb/wiki/Delete-A-Range-Of-Keys
 * Finish `UCIterator`.
-* Build compaction filter for TTLs.
-* Filter expired items via `rocksdb_filterpolicy_create`.
-* Add counter support via `rocksdb_mergeoperator_create`.
-* Use merge operator plus a read for `uc_cas()` and `uc_add()`.
 * Add existing APCu tests.
 * Add option to clear DB at PHP startup.
 * Use `rocksdb_writeoptions_disable_WAL` and write a telltale value on clean
