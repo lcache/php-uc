@@ -260,6 +260,8 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
                 meta.created = meta.modified;
             }
 
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "New value: %ld", meta.value);
+
             // Counters never have anything outside metadata.
             new_data = NULL;
             new_data_len = 0;
@@ -364,7 +366,7 @@ PHP_MINIT_FUNCTION(uc)
 
     // Apply the TTL-enforcing compaction filter.
     cfilter = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
-    rocksdb_options_set_compaction_filter(db_options, cfilter);
+    rocksdb_options_set_compaction_filter(cf_options, cfilter);
 
     // Apply the merge operator.
     merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
@@ -456,7 +458,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
 
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store");
 
-    if (meta.op == kCAS) {
+    if (meta.op == kCAS || meta.op == kInc) {
         meta.cas_value_or_inc = cas_value_or_inc;
     }
 
@@ -484,6 +486,10 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
 
     if (meta.op == kCAS && meta.value_type != kLong) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Trying to write a CAS operation with a non-long value.");
+    }
+
+    if (meta.op == kInc) {
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store kInc %ld", meta.cas_value_or_inc);
     }
 
     // Append other metadata.
