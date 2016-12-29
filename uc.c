@@ -123,13 +123,14 @@ zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta)
         return 0;
     }
 
-    if ((meta->op == kInc || meta->op == kCAS)) {
-        if (meta->value_type != kLong) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc, Dec, or CAS operation has non-long value type: %lu", meta->value_type);
-            return 0;
-        }
+    if (meta->op == kCAS && meta->value_type != kLong) {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc or CAS operation has non-long value type: %lu", meta->value_type);
+        return 0;
+    }
+
+    if (meta->op == kInc || meta->op == kCAS || meta->value_type == kNone) {
         if (val_len > sizeof(*meta)) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc, Dec, or CAS operation has extra bytes: %lu", val_len - sizeof(*meta));
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc or CAS operation has extra bytes: %lu", val_len - sizeof(*meta));
             return 0;
         }
     }
@@ -211,7 +212,7 @@ zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
 
 static void merge_op_destroy(void* arg) { }
 static const char* merge_op_name(void* arg) {
-    return "inc-dec-cas-add";
+    return "php-uc";
 }
 static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, const char* existing_value, size_t existing_value_length, const char* const* operands_list, const size_t* operands_list_length, int num_operands, unsigned char* success, size_t* new_value_length) {
     uc_metadata_t meta = {0};
@@ -219,6 +220,8 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
     zend_bool status_ok;
     const char* new_data;
     size_t new_data_len;
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Attempting full merge.");
 
     if (existing_value != NULL) {
         status_ok = uc_strip_metadata(existing_value, &existing_value_length, &meta);
@@ -229,6 +232,8 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
             return NULL;
         }
     }
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Loaded existing value.");
 
     // In the degenerate case of no operands, succeed and return the original value.
     *success = 1;
@@ -245,7 +250,9 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
             return NULL;
         }
 
-        if (meta.op == kInc) {
+        if (merge_op_meta.op == kInc) {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kInc");
+
             meta.value_type = kLong;
             meta.value += merge_op_meta.cas_value_or_inc;
             meta.modified = merge_op_meta.modified;
@@ -257,14 +264,18 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
             new_data = NULL;
             new_data_len = 0;
         }
-        else if (meta.op == kAdd) {
+        else if (merge_op_meta.op == kAdd) {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kAdd");
+
             if (existing_value == NULL) {
                 meta = merge_op_meta;
                 new_data = operands_list[i];
                 new_data_len = operands_list_length[i];
             }
         }
-        else if (meta.op == kCAS) {
+        else if (merge_op_meta.op == kCAS) {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kCAS");
+
             // Compare. If the expected value is the current one, replace it.
             if (meta.value_type == kLong && meta.value == merge_op_meta.cas_value_or_inc) {
                 meta = merge_op_meta;
@@ -274,6 +285,8 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
                 new_data_len = 0;
             }
         } else {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Unknown meta.op: %d", meta.op);
+
             // Unexpected value for meta.op.
             *success = 0;
             return NULL;
@@ -296,6 +309,8 @@ static char* merge_op_partial_merge(void* arg, const char* key, size_t key_lengt
     uc_metadata_t meta;
     long net_counter_value = 0;
     zend_bool status_ok;
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Attempting partial merge.");
 
     for (size_t i = 0; i < num_operands; i++) {
         status_ok = uc_read_metadata(operands_list[i], operands_list_length[i], &meta);
@@ -344,17 +359,18 @@ PHP_MINIT_FUNCTION(uc)
 
     rocksdb_options_set_create_if_missing(db_options, 1);
     rocksdb_options_set_create_missing_column_families(db_options, 1);
-    rocksdb_options_set_compression(db_options, /* kSnappyCompression */ 0x1);
+    rocksdb_options_set_compression(db_options, /* rocksdb::kSnappyCompression */ 0x1);
+    rocksdb_options_set_info_log_level(db_options, /* InfoLogLevel::DEBUG_LEVEL */ 2);
 
     // Apply the TTL-enforcing compaction filter.
     cfilter = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
     rocksdb_options_set_compaction_filter(db_options, cfilter);
 
-    // Apply the merge operator that supports:
-    // * uc_inc()/uc_dec()
-    // * uc_cas()/uc_add()
+    // Apply the merge operator.
     merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
-    rocksdb_options_set_merge_operator(db_options, merge_op);
+    rocksdb_options_set_merge_operator(cf_options, merge_op);
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
 
     UC_G(db_h) = rocksdb_open_column_families(db_options, UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
     UC_G(cf_h) = cfs_h[0];
@@ -438,21 +454,33 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
 
     meta.op = op;
 
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store");
+
     if (meta.op == kCAS) {
         meta.cas_value_or_inc = cas_value_or_inc;
     }
 
-    // Value: Store longs natively. Otherwise, serialize.
-    if (Z_TYPE_P(val) == IS_LONG) {
+    // Value: Store longs natively. Otherwise, serialize (if there is a value).
+    if (val == NULL) {
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone");
+        meta.value_type = kNone;
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone 2");
+    }
+    else if (Z_TYPE_P(val) == IS_LONG) {
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kLong");
         meta.value_type = kLong;
         meta.value = Z_LVAL_P(val);
     } else {
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kSerialized");
         meta.value_type = kSerialized;
         php_serialize_data_t var_hash;
         PHP_VAR_SERIALIZE_INIT(var_hash);
         php_var_serialize(&val_s, (zval*) val, &var_hash);
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
     }
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 2");
+
 
     if (meta.op == kCAS && meta.value_type != kLong) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Trying to write a CAS operation with a non-long value.");
@@ -466,6 +494,8 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     if (!status) {
         return status;
     }
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 3");
 
     // Generate the write batch.
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
@@ -636,6 +666,8 @@ zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
     char* val_s;
     size_t val_s_len;
     zend_bool status_ok = 0;
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_fetch");
 
     roptions = rocksdb_readoptions_create();
     val_s = rocksdb_get_cf(UC_G(db_h), roptions, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
