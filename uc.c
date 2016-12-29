@@ -325,6 +325,7 @@ static char* merge_op_partial_merge(void* arg, const char* key, size_t key_lengt
 
         // Fail on encountering anything other than increment operations.
         if (meta.op != kInc) {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Non-kInc operation: failing partial merge");
             *success = 0;
             return NULL;
         }
@@ -449,7 +450,7 @@ time_t uc_time() {
 /* }}} */
 
 /* {{{ uc_cache_store */
-zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc_operation_t op, const zend_long cas_value_or_inc) {
+zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc_operation_t op, const zend_long cas_value_or_inc, const zend_long new_cas_value) {
     zend_bool status;
     uc_metadata_t meta = {0};
     smart_str val_s = {0};
@@ -462,8 +463,11 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         meta.cas_value_or_inc = cas_value_or_inc;
     }
 
-    // Value: Store longs natively. Otherwise, serialize (if there is a value).
-    if (val == NULL) {
+    if (meta.op == kCAS) {
+        meta.value = new_cas_value;
+        meta.value_type = kLong;
+    }
+    else if (val == NULL) {
         php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone");
         meta.value_type = kNone;
         php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone 2");
@@ -482,11 +486,6 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     }
 
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 2");
-
-
-    if (meta.op == kCAS && meta.value_type != kLong) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Trying to write a CAS operation with a non-long value.");
-    }
 
     if (meta.op == kInc) {
         php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store kInc %ld", meta.cas_value_or_inc);
@@ -512,6 +511,8 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         rocksdb_writebatch_merge_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
     }
 
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 4");
+
     // Write the batch to storage.
     char *err = NULL;
     rocksdb_writeoptions_t* woptions;
@@ -522,6 +523,8 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     rocksdb_writeoptions_destroy(woptions);
     rocksdb_writebatch_destroy(wb);
     smart_str_free(&val_s);
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
     if (err != NULL) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: %s", err);
@@ -566,7 +569,7 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const uc_operation_t o
 		    zend_hash_internal_pointer_reset_ex(hash, &hpos);
 		    while((hentry = zend_hash_get_current_data_ex(hash, &hpos))) {
 		        if (zend_hash_get_current_key_ex(hash, &hkey, &hkey_idx, &hpos) == HASH_KEY_IS_STRING) {
-		            if(!uc_cache_store(hkey, hentry, (uint32_t) ttl, op, 0)) {
+		            if(!uc_cache_store(hkey, hentry, (uint32_t) ttl, op, 0, 0)) {
 		                add_assoc_long_ex(return_value, hkey->val, hkey->len, -1);  /* -1: insertion error */
 		            }
 		        } else {
@@ -582,7 +585,7 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const uc_operation_t o
     	            RETURN_FALSE;
     	        }
                 /* return true on success */
-    			if(uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, op, 0)) {
+    			if(uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, op, 0, 0)) {
     	            RETURN_TRUE;
                 }
     		} else {
@@ -627,7 +630,7 @@ PHP_FUNCTION(uc_inc) {
 	}
 
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_inc(%d)", step);
-    if (uc_cache_store(key, NULL, 0, kInc, step)) {
+    if (uc_cache_store(key, NULL, 0, kInc, step, 0)) {
         if (success) {
 			ZVAL_TRUE(success);
 		}
@@ -646,15 +649,16 @@ PHP_FUNCTION(uc_inc) {
 PHP_FUNCTION(uc_cas) {
     zend_string *key;
     zend_long vals[2];
-    zval *new;
+    zval *new_val;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sll", &key, &vals[0], &vals[1]) == FAILURE) {
         return;
     }
 
-    ZVAL_LONG(new, vals[1]);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cas 1");
 
-    if (uc_cache_store(key, new, 0, kCAS, vals[0])) {
+
+    if (uc_cache_store(key, NULL, 0, kCAS, vals[0], vals[1])) {
 		RETURN_TRUE;
 	}
 

@@ -64,3 +64,17 @@ $retval = uc_fetch('myinitcount', $success);
 echo 'Got: ' . $retval . PHP_EOL;
 echo 'uc_fetch: ' . $success . PHP_EOL;
 
+echo 'CAS' . PHP_EOL;
+$success = uc_store('mycas', 5);
+echo 'uc_store: ' . $success . PHP_EOL;
+$success = uc_cas('mycas', 5, 10);
+echo 'uc_cas: ' . $success . PHP_EOL;
+$retval = uc_fetch('mycas', $success);
+echo 'Got: ' . $retval . PHP_EOL;
+echo 'uc_fetch: ' . $success . PHP_EOL;
+$success = uc_cas('mycas', 9, 20);
+echo 'uc_cas: ' . $success . PHP_EOL;
+$retval = uc_fetch('mycas', $success);
+echo 'Got: ' . $retval . PHP_EOL;
+echo 'uc_fetch: ' . $success . PHP_EOL;
+
