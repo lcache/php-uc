@@ -195,7 +195,7 @@ zend_bool uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* met
         return status;
     }
 
-    val_len -= sizeof(*meta);
+    *val_len -= sizeof(*meta);
 
     return 1;
 }
@@ -340,7 +340,7 @@ static char* merge_op_partial_merge(void* arg, const char* key, size_t key_lengt
     // Allocate and return a fresh value.
     *new_value_length = sizeof(meta);
     *success = 1;
-    char* result = malloc(sizeof(meta));
+    char* result = (char*) malloc(sizeof(meta));
     memcpy(result, &meta, sizeof(meta));
     return result;
 }
@@ -373,7 +373,7 @@ PHP_MINIT_FUNCTION(uc)
     merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
     rocksdb_options_set_merge_operator(cf_options, merge_op);
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
 
     UC_G(db_h) = rocksdb_open_column_families(db_options, UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
     UC_G(cf_h) = cfs_h[0];
@@ -457,7 +457,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
 
     meta.op = op;
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store");
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store");
 
     if (meta.op == kCAS || meta.op == kInc) {
         meta.cas_value_or_inc = cas_value_or_inc;
@@ -468,16 +468,16 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         meta.value_type = kLong;
     }
     else if (val == NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone");
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone");
         meta.value_type = kNone;
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone 2");
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone 2");
     }
     else if (Z_TYPE_P(val) == IS_LONG) {
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kLong");
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kLong");
         meta.value_type = kLong;
         meta.value = Z_LVAL_P(val);
     } else {
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kSerialized");
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kSerialized");
         meta.value_type = kSerialized;
         php_serialize_data_t var_hash;
         PHP_VAR_SERIALIZE_INIT(var_hash);
@@ -485,7 +485,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
     }
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 2");
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 2");
 
     if (meta.op == kInc) {
         php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store kInc %ld", meta.cas_value_or_inc);
@@ -500,7 +500,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         return status;
     }
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 3");
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 3");
 
     // Generate the write batch.
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
@@ -511,7 +511,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         rocksdb_writebatch_merge_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
     }
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 4");
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 4");
 
     // Write the batch to storage.
     char *err = NULL;
@@ -524,7 +524,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     rocksdb_writebatch_destroy(wb);
     smart_str_free(&val_s);
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
     if (err != NULL) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: %s", err);
