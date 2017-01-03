@@ -36,6 +36,88 @@ int worker_write(const uc_persistence_t* p, char* key, size_t key_len, char* val
     return retval;
 }
 
+int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available)
+{
+    int retval;
+    *available = NULL;
+
+    // @TODO: Process/thread affinity would help here.
+    for (size_t id = 0; id < wp->workers_count; id++) {
+        retval = pthread_mutex_trylock(&wp->workers[id].use_l);
+        if (0 == retval) {
+            *available = &wp->workers[id];
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Picked worker: %lu", id);
+            break;
+        }
+        else if (EBUSY != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_trylock for use_l: %s", strerror(retval));
+            return retval;
+        }
+    }
+
+    // @TODO: Add handling to wait on the open_workers condition variable and try again.
+    if (NULL == available) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed to store to user cache: no workers available");
+        return EIO;
+    }
+
+    return 0;
+}
+
+int uc_workers_complete_rpc(worker_t* w)
+{
+    int retval;
+
+    // Prepare to wait on the req condition variable.
+    retval = pthread_mutex_lock(&w->req_l);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_lock for req_l: %s", strerror(retval));
+        return retval;
+    }
+
+    // Signal to the worker to respond.
+    retval = pthread_cond_signal(&w->resp);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_signal for resp: %s", strerror(retval));
+        return retval;
+    }
+
+    // Wait for completion.
+    retval = pthread_cond_wait(&w->req, &w->req_l);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_wait for req: %s", strerror(retval));
+        return retval;
+    }
+    return 0;
+}
+
+int uc_workers_unlock(worker_t* w) {
+    int retval;
+
+    retval = pthread_mutex_unlock(&w->req_l);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock for req_l: %s", strerror(retval));
+        return retval;
+    }
+
+    retval = pthread_mutex_unlock(&w->use_l);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock: %s", strerror(retval));
+        return retval;
+    }
+
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Unlocked worker %lu", w->id);
+
+    // Let others know there's an open worker.
+    //retval = pthread_cond_signal(available->ow);
+    //if (0 != retval) {
+    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_signal on ow: %s", strerror(retval));
+    //    return retval;
+    //}
+
+    return 0;
+}
+
 static void* slot_worker(void *arg)
 {
     int retval;
@@ -70,7 +152,7 @@ static void* slot_worker(void *arg)
 
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
 
-        success = worker_write(w->k, w->kl, w->v, w->vl, w->m);
+        success = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
         if (!success) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write", w->id);
             return NULL;
@@ -96,13 +178,13 @@ static void* slot_worker(void *arg)
     return NULL;
 }
 
-int uc_workers_init(const uc_persistence_t* p, size_t workers_count, worker_pool_t** wp)
+int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_pool_t** wp)
 {
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Initializing concurrency: %lu", UC_G(concurrency));
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Initializing concurrency: %lu", workers_count);
 
     // Initialize concurrency.
     int retval;
-    *wp = (worker_pool_t*) mmap(NULL, sizeof(worker_pool_t) + sizeof(worker_t) * workers_count, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    *wp = (uc_worker_pool_t*) mmap(NULL, sizeof(uc_worker_pool_t) + sizeof(worker_t) * workers_count, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
     (*wp)->workers_count = workers_count;
 
@@ -200,7 +282,7 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, worker_pool
     return 0;
 }
 
-int uc_workers_destroy(worker_pool_t* wp)
+int uc_workers_destroy(uc_worker_pool_t* wp)
 {
     int retval;
     for (size_t id = 0; id < wp->workers_count; id++) {

@@ -1,5 +1,7 @@
 #include <syslog.h>
 #include <errno.h>
+#include <string.h>
+#include <stdlib.h>
 #include "persistence.h"
 #include "marshalling.h"
 
@@ -171,7 +173,7 @@ int uc_persistence_init(const char* storage_directory, uc_persistence_t* p)
 
     p->db_options = rocksdb_options_create();
     p->cf_options = rocksdb_options_create();
-    cf_opts[0] = p->cf_options);
+    cf_opts[0] = p->cf_options;
 
     rocksdb_options_set_create_if_missing(p->db_options, 1);
     rocksdb_options_set_create_missing_column_families(p->db_options, 1);

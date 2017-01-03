@@ -53,10 +53,13 @@ typedef struct {
     size_t workers_count;
     pthread_cond_t open_worker;
     pthread_mutex_t open_worker_lock;
-    worker_t* workers;
-} worker_pool_t;
+    worker_t workers[];
+} uc_worker_pool_t;
 
-int uc_workers_init(const uc_persistence_t* p, size_t workers_count, worker_pool_t** wp);
-int uc_workers_destroy(worker_pool_t* wp);
+int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_pool_t** wp);
+int uc_workers_destroy(uc_worker_pool_t* wp);
+int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available);
+int uc_workers_complete_rpc(worker_t* w);
+int uc_workers_unlock(worker_t* w);
 
 #endif

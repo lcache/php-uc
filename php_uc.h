@@ -32,7 +32,7 @@ ZEND_BEGIN_MODULE_GLOBALS(uc)
     long concurrency;
     char* storage_directory;
     uc_persistence_t persistence;
-    uc_worker_pool_t** workers;
+    uc_worker_pool_t** pool;
 ZEND_END_MODULE_GLOBALS(uc)
 
 #ifdef ZTS

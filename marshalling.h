@@ -51,7 +51,7 @@ typedef struct {
 int uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta);
 int uc_metadata_is_fresh(uc_metadata_t meta, time_t now);
 int uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* meta);
-int uc_append_metadata(smart_str* val, uc_metadata_t meta);
+int uc_init_metadata(uc_metadata_t* meta);
 void uc_print_metadata(const char *val, size_t val_len);
 
 #endif

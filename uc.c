@@ -95,7 +95,7 @@ PHP_MINIT_FUNCTION(uc)
         return FAILURE;
     }
 
-    retval = uc_workers_init(&UC_G(persistence), UC_G(concurrency), UC_G(workers));
+    retval = uc_workers_init(&UC_G(persistence), UC_G(concurrency), UC_G(pool));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_init: %s", strerror(retval));
         return FAILURE;
@@ -110,13 +110,13 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 
     int retval;
 
-    retval = uc_workers_destroy(*UC_G(workers));
+    retval = uc_workers_destroy(*UC_G(pool));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_destroy: %s", strerror(retval));
         return FAILURE;
     }
 
-    retval = uc_persistence_destroy(UC_G(workers));
+    retval = uc_persistence_destroy(&UC_G(persistence));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_persistence_destroy: %s", strerror(retval));
         return FAILURE;
@@ -130,13 +130,21 @@ PHP_FUNCTION(uc_test)
     RETURN_STRING("UC Test");
 }
 
+zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
+    uc_init_metadata(&meta);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
+    smart_str_appendl(val, (const char *) &meta, sizeof(meta));
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
+    //uc_print_metadata(ZSTR_VAL(val->s), ZSTR_LEN(val->s));
+    return 1;
+}
+
 /* {{{ proto void uc_compact() */
 PHP_FUNCTION(uc_compact)
 {
     // @TODO: Reimplement with workers.
-    RETURN_TRUE;
 
-    rocksdb_compact_range_cf(UC_G(db_h), UC_G(cf_h), NULL, 0, NULL, 0);
+    //rocksdb_compact_range_cf(UC_G(db_h), UC_G(cf_h), NULL, 0, NULL, 0);
     RETURN_TRUE;
 }
 /* }}} */
@@ -239,25 +247,12 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         return 0;
     }
 
-    // Find a free worker. Process/thread affinity would help here.
+    // Find a free worker.
+    worker_t* available;
     int retval;
-    worker_t* available = NULL;
-    for (size_t i = 0; i < UC_G(concurrency); i++) {
-        retval = pthread_mutex_trylock(&UC_G(workers)[i].use_l);
-        if (0 == retval) {
-            available = &UC_G(workers)[i];
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Picked worker: %lu", i);
-            break;
-        }
-        else if (EBUSY != retval) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_trylock for use_l: %s", strerror(retval));
-            return 0;
-        }
-    }
-
-    // @TODO: Add handling to wait on the open_workers condition variable and try again.
-    if (NULL == available) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: no workers available");
+    retval = uc_workers_choose_and_lock(*UC_G(pool), &available);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_choose_and_lock: %s", strerror(retval));
         smart_str_free(&val_s);
         return 0;
     }
@@ -270,46 +265,18 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     available->m = meta;
     smart_str_free(&val_s);
 
-    // Prepare to wait on the req condition variable.
-    retval = pthread_mutex_lock(&available->req_l);
+    // Complete the RPC
+    retval = uc_workers_complete_rpc(available);
     if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_lock for req_l: %s", strerror(retval));
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_send_request: %s", strerror(retval));
         return 0;
     }
-
-    // Signal to the worker to respond.
-    pthread_cond_signal(&available->resp);
-
-    // Wait for completion.
-    retval = pthread_cond_wait(&available->req, &available->req_l);
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->id);
+    retval = uc_workers_unlock(available);
     if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_wait: %s", strerror(retval));
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_unlock: %s", strerror(retval));
         return 0;
     }
-
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->i);
-
-    retval = pthread_mutex_unlock(&available->req_l);
-    if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock for req_l: %s", strerror(retval));
-        return 0;
-    }
-
-    // We are no longer using this worker.
-    retval = pthread_mutex_unlock(&available->use_l);
-    if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock: %s", strerror(retval));
-        return 0;
-    }
-
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Unlocked worker %lu", available->i);
-
-    // Let others know there's an open worker.
-    //retval = pthread_cond_signal(available->ow);
-    //if (0 != retval) {
-    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_signal on ow: %s", strerror(retval));
-    //    return 0;
-    //}
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
