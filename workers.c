@@ -184,9 +184,12 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
 
     // Initialize concurrency.
     int retval;
-    *wp = (uc_worker_pool_t*) mmap(NULL, sizeof(uc_worker_pool_t) + sizeof(worker_t) * workers_count, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uc_worker_pool_t* pool;
 
-    (*wp)->workers_count = workers_count;
+    *wp = NULL;
+    pool = (uc_worker_pool_t*) mmap(NULL, sizeof(uc_worker_pool_t) + sizeof(worker_t) * workers_count, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    pool->workers_count = workers_count;
 
     // Mutex attributes
     pthread_mutexattr_t attr_mutex;
@@ -208,17 +211,17 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
     //    return FAILURE;
     //}
     for (int i = 0; i < workers_count; i++) {
-        retval = pthread_mutex_init(&(*wp)->workers[i].use_l, &attr_mutex);
+        retval = pthread_mutex_init(&pool->workers[i].use_l, &attr_mutex);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_init for use_l: %s", strerror(retval));
             return retval;
         }
-        retval = pthread_mutex_init(&(*wp)->workers[i].req_l, &attr_mutex);
+        retval = pthread_mutex_init(&pool->workers[i].req_l, &attr_mutex);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_init for req_l: %s", strerror(retval));
             return retval;
         }
-        retval = pthread_mutex_init(&(*wp)->workers[i].resp_l, &attr_mutex);
+        retval = pthread_mutex_init(&pool->workers[i].resp_l, &attr_mutex);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_init for resp_l: %s", strerror(retval));
             return retval;
@@ -250,12 +253,12 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
     //    return retval;
     //}
     for (size_t i = 0; i < workers_count; i++) {
-        retval = pthread_cond_init(&(*wp)->workers[i].req, &attr_cvar);
+        retval = pthread_cond_init(&pool->workers[i].req, &attr_cvar);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_init for req: %s", strerror(retval));
             return retval;
         }
-        retval = pthread_cond_init(&(*wp)->workers[i].resp, &attr_cvar);
+        retval = pthread_cond_init(&pool->workers[i].resp, &attr_cvar);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_init for resp: %s", strerror(retval));
             return retval;
@@ -270,14 +273,16 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
 
     // Threads
     for (size_t id = 0; id < workers_count; id++) {
-        (*wp)->workers[id].ow = &(*wp)->open_worker;
-        (*wp)->workers[id].id = id;
-        retval = pthread_create(&(*wp)->workers[id].td, NULL, &slot_worker, &(*wp)->workers[id]);
+        pool->workers[id].ow = &pool->open_worker;
+        pool->workers[id].id = id;
+        retval = pthread_create(&pool->workers[id].td, NULL, &slot_worker, &pool->workers[id]);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_create: %s", strerror(retval));
             return retval;
         }
     }
+
+    *wp = pool;
 
     return 0;
 }

@@ -95,7 +95,7 @@ PHP_MINIT_FUNCTION(uc)
         return FAILURE;
     }
 
-    retval = uc_workers_init(&UC_G(persistence), UC_G(concurrency), UC_G(pool));
+    retval = uc_workers_init(&UC_G(persistence), UC_G(concurrency), &UC_G(pool));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_init: %s", strerror(retval));
         return FAILURE;
@@ -110,7 +110,7 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 
     int retval;
 
-    retval = uc_workers_destroy(*UC_G(pool));
+    retval = uc_workers_destroy(UC_G(pool));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_destroy: %s", strerror(retval));
         return FAILURE;
@@ -250,7 +250,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     // Find a free worker.
     worker_t* available;
     int retval;
-    retval = uc_workers_choose_and_lock(*UC_G(pool), &available);
+    retval = uc_workers_choose_and_lock(UC_G(pool), &available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_choose_and_lock: %s", strerror(retval));
         smart_str_free(&val_s);
