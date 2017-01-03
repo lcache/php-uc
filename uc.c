@@ -25,12 +25,13 @@
 #include "php.h"
 #include "php_ini.h"
 #include "php_uc.h"
+#include "marshalling.h"
+#include "persistence.h"
 #include "uc_arginfo.h"
 #include "zend_smart_str.h"
 #include "ext/standard/php_var.h"
 #include "SAPI.h"
 
-#include <sys/mman.h>
 #include <pthread.h>
 #include <syslog.h>
 
@@ -72,8 +73,6 @@ PHP_INI_BEGIN()
     STD_PHP_INI_ENTRY("uc.concurrency", "16", PHP_INI_SYSTEM, OnUpdateLong, concurrency, zend_uc_globals, uc_globals)
 PHP_INI_END()
 
-#define UC_MAGIC 19840311
-
 static void php_uc_init_globals(zend_uc_globals *uc_globals)
 {
 }
@@ -83,483 +82,24 @@ PHP_RINIT_FUNCTION(uc)
     return SUCCESS;
 }
 
-zend_bool uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
-    // @TODO: Move errors to a *err parameter.
-    if (val_len < sizeof(*meta)) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Value (len %lu) is shorter than expected metadata (len %lu).", val_len, sizeof(*meta));
-        return 0;
-    }
-
-    // Copy metadata into the struct.
-    memcpy(meta, (void *) (val + val_len - sizeof(*meta)), sizeof(*meta));
-
-    if (meta->magic != UC_MAGIC) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Magic number (%lu) does not match expected value (%lu).", meta->magic, UC_MAGIC);
-        return 0;
-    }
-
-    if (meta->version > 1) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Metadata (version %lu) exceeds known versions.", meta->version);
-        return 0;
-    }
-
-    if (meta->op == kCAS && meta->value_type != kLong) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc or CAS operation has non-long value type: %lu", meta->value_type);
-        return 0;
-    }
-
-    if (meta->op == kInc || meta->op == kCAS || meta->value_type == kNone) {
-        if (val_len > sizeof(*meta)) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Inc or CAS operation has extra bytes: %lu", val_len - sizeof(*meta));
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
-void uc_print_metadata(const char *val, size_t val_len) {
-    uc_metadata_t meta;
-    uc_read_metadata(val, val_len, &meta);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "OP:  %d", meta.op);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TS:  %lu", meta.modified);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "TTL: %lu", meta.ttl);
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "VER: %lu", meta.version);
-}
-
-zend_bool uc_metadata_is_fresh(uc_metadata_t meta, time_t now) {
-    // Entries with no TTL are always fresh.
-    if (meta.ttl == 0) {
-        return 1;
-    }
-
-    // Entries with a TTL of 1984 should go down the memory hole.
-    if (meta.ttl == 1984) {
-        return 0;
-    }
-
-    // Check the time elapsed since last modification.
-    if (meta.modified + meta.ttl >= now) {
-        return 1;
-    }
-
-    return 0;
-}
-
-static void uc_filter_destory(void* arg) {}
-static const char* uc_filter_name(void* arg) { return "ttl"; }
-static unsigned char uc_filter_filter(void* arg, int level, const char* key, size_t key_length, const char* existing_value, size_t value_length,
-                                      char** new_value, size_t* new_value_length, unsigned char* value_changed) {
-    uc_metadata_t meta;
-    zend_bool status_ok;
-
-    status_ok = uc_read_metadata(existing_value, value_length, &meta);
-    // Keep entries on parsing failure.
-    if (!status_ok) {
-        return 0;
-    }
-
-    // Prune stale entries with TTLs.
-    if (!uc_metadata_is_fresh(meta, time(NULL))) {
-        return 1;
-    }
-
-    return 0;
-}
-
-zend_bool uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* meta) {
-    zend_bool status;
-
-    status = uc_read_metadata(val, *val_len, meta);
-    if (!status) {
-        return status;
-    }
-
-    *val_len -= sizeof(*meta);
-
-    return 1;
-}
-
-zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
-    meta.version = 1;
-    meta.magic = UC_MAGIC;
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
-    smart_str_appendl(val, (const char *) &meta, sizeof(meta));
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
-    //uc_print_metadata(ZSTR_VAL(val->s), ZSTR_LEN(val->s));
-    return 1;
-}
-
-static void merge_op_destroy(void* arg) { }
-static const char* merge_op_name(void* arg) {
-    return "php-uc";
-}
-static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, const char* existing_value, size_t existing_value_length, const char* const* operands_list, const size_t* operands_list_length, int num_operands, unsigned char* success, size_t* new_value_length) {
-    uc_metadata_t meta = {0};
-    uc_metadata_t merge_op_meta;
-    zend_bool status_ok;
-    const char* new_data;
-    size_t new_data_len;
-
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Attempting full merge.");
-
-    if (existing_value != NULL) {
-        status_ok = uc_strip_metadata(existing_value, &existing_value_length, &meta);
-
-        // Fail on invalid metadata.
-        if (!status_ok) {
-            *success = 0;
-            return NULL;
-        }
-    }
-
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Loaded existing value.");
-
-    // In the degenerate case of no operands, succeed and return the original value.
-    *success = 1;
-    new_data = existing_value;
-    new_data_len = existing_value_length;
-
-    // Iterate through the merge operands.
-    for (size_t i = 0; i < num_operands; i++) {
-        status_ok = uc_read_metadata(operands_list[i], operands_list_length[i], &merge_op_meta);
-
-        // Fail on invalid metadata.
-        if (!status_ok) {
-            *success = 0;
-            return NULL;
-        }
-
-        if (merge_op_meta.op == kInc) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kInc");
-
-            meta.value_type = kLong;
-            meta.value += merge_op_meta.cas_value_or_inc;
-            meta.modified = merge_op_meta.modified;
-            if (!meta.created) {
-                meta.created = meta.modified;
-            }
-
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "New value: %ld", meta.value);
-
-            // Counters never have anything outside metadata.
-            new_data = NULL;
-            new_data_len = 0;
-        }
-        else if (merge_op_meta.op == kAdd) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kAdd");
-
-            if (existing_value == NULL) {
-                meta = merge_op_meta;
-                new_data = operands_list[i];
-                new_data_len = operands_list_length[i];
-            }
-        }
-        else if (merge_op_meta.op == kCAS) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kCAS");
-
-            // Compare. If the expected value is the current one, replace it.
-            if (meta.value_type == kLong && meta.value == merge_op_meta.cas_value_or_inc) {
-                meta = merge_op_meta;
-
-                // CAS values never have anything outside metadata.
-                new_data = NULL;
-                new_data_len = 0;
-            }
-        } else {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Unknown meta.op: %d", meta.op);
-
-            // Unexpected value for meta.op.
-            *success = 0;
-            return NULL;
-        }
-    }
-
-    // Combine the data and metadata into a single value.
-    *new_value_length = new_data_len + sizeof(meta);
-    char *new_value = malloc(*new_value_length);
-    if (new_data) {
-        memcpy(new_value, &new_data, new_data_len);
-    }
-    memcpy(new_value + new_data_len, &meta, sizeof(meta));
-
-    return new_value;
-}
-
-static char* merge_op_partial_merge(void* arg, const char* key, size_t key_length, const char* const* operands_list, const size_t* operands_list_length, int num_operands, unsigned char* success, size_t* new_value_length) {
-
-    uc_metadata_t meta;
-    long net_counter_value = 0;
-    zend_bool status_ok;
-
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Attempting partial merge.");
-
-    for (size_t i = 0; i < num_operands; i++) {
-        status_ok = uc_read_metadata(operands_list[i], operands_list_length[i], &meta);
-
-        // Fail on invalid metadata.
-        if (!status_ok) {
-            *success = 0;
-            return NULL;
-        }
-
-        // Fail on encountering anything other than increment operations.
-        if (meta.op != kInc) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Non-kInc operation: failing partial merge");
-            *success = 0;
-            return NULL;
-        }
-
-        // Aggregate the counter data.
-        net_counter_value += meta.value;
-    }
-
-    // Use the most recent metadata, but apply the net counter delta.
-    meta.value = net_counter_value;
-
-    // Allocate and return a fresh value.
-    *new_value_length = sizeof(meta);
-    *success = 1;
-    char* result = (char*) malloc(sizeof(meta));
-    memcpy(result, &meta, sizeof(meta));
-    return result;
-}
-
-zend_bool worker_write(char* key, size_t key_len, char* val, size_t val_size, uc_metadata_t meta) {
-    zend_bool success = 1;
-
-    // Generate the write batch.
-    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-
-    if (meta.op == kPut) {
-        rocksdb_writebatch_put_cf(wb, UC_G(cf_h), key, key_len, val, val_size);
-    } else {
-        rocksdb_writebatch_merge_cf(wb, UC_G(cf_h), key, key_len, val, val_size);
-    }
-
-    // Write the batch to storage.
-    char* err = NULL;
-    rocksdb_writeoptions_t* woptions;
-    woptions = rocksdb_writeoptions_create();
-    //rocksdb_writeoptions_disable_WAL(woptions, 1);
-    rocksdb_write(UC_G(db_h), woptions, wb, &err);
-
-    if (NULL != err) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed rocksdb_write: %s", pthread_self(), err);
-        success = 0;
-    }
-
-    // Clean up.
-    rocksdb_writeoptions_destroy(woptions);
-    rocksdb_writebatch_destroy(wb);
-
-    return success;
-}
-
-static void* slot_worker(void *arg)
-{
-    int retval;
-    int success;
-    worker_t *w = arg;
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Starting", w->i);
-
-    while(1) {
-        retval = pthread_mutex_lock(&w->resp_l);
-        if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_lock: %s", w->i, strerror(retval));
-            return NULL;
-        }
-
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->i);
-
-        // Wait for a request.
-        retval = pthread_cond_wait(&w->resp, &w->resp_l);
-        if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_cond_wait: %s", w->i, strerror(retval));
-            return NULL;
-        }
-
-        if (kStopping == w->l) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "[%lu] Stopping", w->i);
-            retval = pthread_mutex_unlock(&w->resp_l);
-            if (0 != retval) {
-                syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on stop: %s", w->i, strerror(retval));
-            }
-            return NULL;
-        }
-
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->i);
-
-        success = worker_write(w->k, w->kl, w->v, w->vl, w->m);
-        if (!success) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write", w->i);
-            return NULL;
-        }
-
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->i);
-
-        // @TODO: Write anything back to the meta struct to signal success?
-
-        retval = pthread_cond_signal(&w->req);
-        if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_cond_signal on req: %s", w->i, strerror(retval));
-            return NULL;
-        }
-
-        retval = pthread_mutex_unlock(&w->resp_l);
-        if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on loop: %s", w->i, strerror(retval));
-            return NULL;
-        }
-    }
-
-    return NULL;
-}
-
 PHP_MINIT_FUNCTION(uc)
 {
     ZEND_INIT_MODULE_GLOBALS(uc, php_uc_init_globals, NULL);
     REGISTER_INI_ENTRIES();
 
-    char* err = NULL;
-
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing concurrency: %lu", UC_G(concurrency));
-
-    // Initialize concurrency.
     int retval;
-    UC_G(workers) = (worker_t*) mmap(NULL, sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t) + sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    //UC_G(open_worker) = (pthread_cond_t*) (UC_G(workers) + sizeof(worker_t) * UC_G(concurrency));
-    //UC_G(open_worker_lock) = (pthread_mutex_t*) (UC_G(workers) + sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t));
 
-    // Mutex attributes
-    pthread_mutexattr_t attr_mutex;
-    retval = pthread_mutexattr_init(&attr_mutex);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_init: %s", strerror(retval));
-        return FAILURE;
-    }
-    retval = pthread_mutexattr_setpshared(&attr_mutex, PTHREAD_PROCESS_SHARED);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_setpshared: %s", strerror(retval));
+    retval = uc_persistence_init(UC_G(storage_directory), &UC_G(persistence));
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_persistence_init: %s", strerror(retval));
         return FAILURE;
     }
 
-    // Mutexes
-    //retval = pthread_mutex_init(UC_G(open_worker_lock), &attr_mutex);
-    //if (retval != 0) {
-    //   php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for open_worker_lock: %s", strerror(retval));
-    //    return FAILURE;
-    //}
-    for (int i = 0; i < UC_G(concurrency); i++) {
-        retval = pthread_mutex_init(&UC_G(workers)[i].use_l, &attr_mutex);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for use_l: %s", strerror(retval));
-            return FAILURE;
-        }
-        retval = pthread_mutex_init(&UC_G(workers)[i].req_l, &attr_mutex);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for req_l: %s", strerror(retval));
-            return FAILURE;
-        }
-        retval = pthread_mutex_init(&UC_G(workers)[i].resp_l, &attr_mutex);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for resp_l: %s", strerror(retval));
-            return FAILURE;
-        }
-    }
-    retval = pthread_mutexattr_destroy(&attr_mutex);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_destroy: %s", strerror(retval));
+    retval = uc_workers_init(&UC_G(persistence), UC_G(concurrency), UC_G(workers));
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_init: %s", strerror(retval));
         return FAILURE;
     }
-
-    // Condition variable attributes
-    pthread_condattr_t attr_cvar;
-    retval = pthread_condattr_init(&attr_cvar);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_init: %s", strerror(retval));
-        return FAILURE;
-    }
-    retval = pthread_condattr_setpshared(&attr_cvar, PTHREAD_PROCESS_SHARED);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_condattr_setpshared: %s", strerror(retval));
-        return FAILURE;
-    }
-
-    // Condition variables
-    //retval = pthread_cond_init(UC_G(open_worker), &attr_cvar);
-    //if (retval != 0) {
-    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for open_worker: %s", strerror(retval));
-    //    return FAILURE;
-    //}
-    for (int i = 0; i < UC_G(concurrency); i++) {
-        retval = pthread_cond_init(&UC_G(workers)[i].req, &attr_cvar);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for req: %s", strerror(retval));
-            return FAILURE;
-        }
-        retval = pthread_cond_init(&UC_G(workers)[i].resp, &attr_cvar);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for resp: %s", strerror(retval));
-            return FAILURE;
-        }
-
-    }
-    retval = pthread_condattr_destroy(&attr_cvar);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_condattr_destroy: %s", strerror(retval));
-        return FAILURE;
-    }
-
-    // Threads
-    for (size_t i = 0; i < UC_G(concurrency); i++) {
-        UC_G(workers)[i].ow = UC_G(open_worker);
-        UC_G(workers)[i].i = i;
-        retval = pthread_create(&UC_G(workers)[i].td, NULL, &slot_worker, &UC_G(workers)[i]);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_create: %s", strerror(retval));
-            return FAILURE;
-        }
-    }
-
-    // Initialize the database.
-    rocksdb_mergeoperator_t* merge_op;
-    const char* cf_names[1] = {"default"};
-    const rocksdb_options_t* cf_opts[1];
-    rocksdb_column_family_handle_t* cfs_h[1];
-
-    UC_G(db_options) = rocksdb_options_create();
-    UC_G(cf_options) = rocksdb_options_create();
-    cf_opts[0] = UC_G(cf_options);
-
-    rocksdb_options_set_create_if_missing(UC_G(db_options), 1);
-    rocksdb_options_set_create_missing_column_families(UC_G(db_options), 1);
-    //rocksdb_options_set_compression(UC_G(db_options), /* rocksdb::kSnappyCompression */ 0x1);
-    //rocksdb_options_set_allow_concurrent_memtable_write(UC_G(db_options), 0);
-    rocksdb_options_set_info_log_level(UC_G(db_options), /* InfoLogLevel::DEBUG_LEVEL */ 2);
-
-    // Apply the TTL-enforcing compaction filter.
-    UC_G(cfilter) = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
-    rocksdb_options_set_compaction_filter(UC_G(cf_options), UC_G(cfilter));
-
-    // Apply the merge operator.
-    merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
-    rocksdb_options_set_merge_operator(UC_G(cf_options), merge_op);
-
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
-
-    UC_G(db_h) = rocksdb_open_column_families(UC_G(db_options), UC_G(storage_directory), 1, cf_names, cf_opts, cfs_h, &err);
-    UC_G(cf_h) = cfs_h[0];
-
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Opening the user cache database failed: %s", err);
-        return FAILURE;
-    }
-
-    // @TODO: Check for a clean shutdown. If not, clear the DB.
-
-    rocksdb_free(err);
-    err = NULL;
 
     return SUCCESS;
 }
@@ -568,29 +108,19 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 {
     UNREGISTER_INI_ENTRIES();
 
-    // Stop workers
     int retval;
-    for (int i = 0; i < UC_G(concurrency); i++) {
-        UC_G(workers)[i].l = kStopping;
-        retval = pthread_cond_signal(&UC_G(workers)[i].req);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_signal: %s", strerror(retval));
-            return FAILURE;
-        }
-        pthread_join(UC_G(workers)[i].td, NULL);
-        if (retval != 0) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_join: %s", strerror(retval));
-            return FAILURE;
-        }
+
+    retval = uc_workers_destroy(*UC_G(workers));
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_destroy: %s", strerror(retval));
+        return FAILURE;
     }
 
-    // @TODO: Record that there's been a clean shutdown.
-
-    rocksdb_column_family_handle_destroy(UC_G(cf_h));
-    rocksdb_close(UC_G(db_h));
-    rocksdb_options_destroy(UC_G(db_options));
-    //rocksdb_compactionfilter_destroy(UC_G(cfilter));
-    rocksdb_options_destroy(UC_G(cf_options));
+    retval = uc_persistence_destroy(UC_G(workers));
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_persistence_destroy: %s", strerror(retval));
+        return FAILURE;
+    }
 
     return SUCCESS;
 }
@@ -618,25 +148,22 @@ PHP_FUNCTION(uc_clear_cache)
         return;
     }
 
-    // @TODO: Reimplement with workers.
-    RETURN_TRUE;
-
-    char *err = NULL;
-    rocksdb_writeoptions_t* woptions;
+    //char *err = NULL;
+    //rocksdb_writeoptions_t* woptions;
 
     // @TODO: Optimize to use rocksdb_delete_file_in_range_cf() first.
 
-    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    rocksdb_writebatch_delete_range_cf(wb, UC_G(cf_h), NULL, 0, NULL, 0);
-    woptions = rocksdb_writeoptions_create();
+    //rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
+    //rocksdb_writebatch_delete_range_cf(wb, UC_G(cf_h), NULL, 0, NULL, 0);
+    //woptions = rocksdb_writeoptions_create();
     //rocksdb_writeoptions_disable_WAL(woptions, 1);
-    rocksdb_write(UC_G(db_h), woptions, wb, &err);
-    rocksdb_writeoptions_destroy(woptions);
+    //rocksdb_write(UC_G(db_h), woptions, wb, &err);
+    //rocksdb_writeoptions_destroy(woptions);
 
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to clear the user cache database: %s", err);
-        RETURN_FALSE;
-    }
+    //if (err != NULL) {
+    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to clear the user cache database: %s", err);
+    //    RETURN_FALSE;
+    //}
 
     RETURN_TRUE;
 }
@@ -935,7 +462,7 @@ zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_fetch");
 
     roptions = rocksdb_readoptions_create();
-    val_s = rocksdb_get_cf(UC_G(db_h), roptions, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
+    val_s = rocksdb_get_cf(UC_G(persistence).db_h, roptions, UC_G(persistence).cf_h, ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
     rocksdb_readoptions_destroy(roptions);
 
     // A NULL is a miss.
@@ -1063,10 +590,10 @@ zend_bool uc_cache_delete(zend_string *key)
     rocksdb_writeoptions_t* woptions;
 
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    rocksdb_writebatch_delete_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key));
+    rocksdb_writebatch_delete_cf(wb, UC_G(persistence).cf_h, ZSTR_VAL(key), ZSTR_LEN(key));
     woptions = rocksdb_writeoptions_create();
     //rocksdb_writeoptions_disable_WAL(woptions, 1);
-    rocksdb_write(UC_G(db_h), woptions, wb, &err);
+    rocksdb_write(UC_G(persistence).db_h, woptions, wb, &err);
     rocksdb_writeoptions_destroy(woptions);
     rocksdb_writebatch_destroy(wb);
 

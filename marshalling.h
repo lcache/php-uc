@@ -16,49 +16,42 @@
   +----------------------------------------------------------------------+
  */
 
-#ifndef PHP_UC_H
-#define PHP_UC_H 1
+#ifndef UC_MARSHALLING_H
+#define UC_MARSHALLING_H
 
-#ifdef ZTS
-#include "TSRM.h"
-#endif
+#include <stddef.h>
+#include <stdint.h>
+#include <time.h>
 
-#include "marshalling.h"
-#include "persistence.h"
-#include "workers.h"
+typedef enum {
+    kPut = 0,
+    kInc = 1,
+    kAdd = 2,
+    kCAS = 3
+} uc_operation_t;
 
-ZEND_BEGIN_MODULE_GLOBALS(uc)
-    zend_bool enabled;
-    long concurrency;
-    char* storage_directory;
-    uc_persistence_t persistence;
-    uc_worker_pool_t** workers;
-ZEND_END_MODULE_GLOBALS(uc)
+typedef enum {
+    kNone = 0,
+    kSerialized = 1,
+    kLong = 2
+} uc_value_type_t;
 
-#ifdef ZTS
-#define UC_G(v) TSRMG(uc_globals_id, zend_uc_globals *, v)
-#else
-#define UC_G(v) (uc_globals.v)
-#endif
+typedef struct {
+    uc_value_type_t value_type;
+    long value;
+    long cas_value_or_inc;
+    size_t ttl;
+    time_t created;
+    time_t modified;
+    uc_operation_t op;
+    size_t version;
+    uint32_t magic;
+} uc_metadata_t;
 
-#define PHP_UC_VERSION "1.0"
-#define PHP_UC_EXTNAME "uc"
-
-PHP_MINIT_FUNCTION(uc);
-PHP_MSHUTDOWN_FUNCTION(uc);
-PHP_RINIT_FUNCTION(uc);
-
-PHP_FUNCTION(uc_test);
-PHP_FUNCTION(uc_compact);
-PHP_FUNCTION(uc_clear_cache);
-PHP_FUNCTION(uc_store);
-PHP_FUNCTION(uc_fetch);
-PHP_FUNCTION(uc_delete);
-PHP_FUNCTION(uc_inc);
-PHP_FUNCTION(uc_add);
-PHP_FUNCTION(uc_cas);
-
-extern zend_module_entry uc_module_entry;
-#define phpext_uc_prt &uc_module_entry
+int uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta);
+int uc_metadata_is_fresh(uc_metadata_t meta, time_t now);
+int uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* meta);
+int uc_append_metadata(smart_str* val, uc_metadata_t meta);
+void uc_print_metadata(const char *val, size_t val_len);
 
 #endif

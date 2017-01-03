@@ -16,49 +16,47 @@
   +----------------------------------------------------------------------+
  */
 
-#ifndef PHP_UC_H
-#define PHP_UC_H 1
+#ifndef UC_WORKERS_H
+#define UC_WORKERS_H
 
-#ifdef ZTS
-#include "TSRM.h"
-#endif
-
+#include <pthread.h>
 #include "marshalling.h"
 #include "persistence.h"
-#include "workers.h"
 
-ZEND_BEGIN_MODULE_GLOBALS(uc)
-    zend_bool enabled;
-    long concurrency;
-    char* storage_directory;
-    uc_persistence_t persistence;
-    uc_worker_pool_t** workers;
-ZEND_END_MODULE_GLOBALS(uc)
+#define MAX_KEY_LENGTH 512
+#define MAX_VALUE_SIZE 2097152
 
-#ifdef ZTS
-#define UC_G(v) TSRMG(uc_globals_id, zend_uc_globals *, v)
-#else
-#define UC_G(v) (uc_globals.v)
-#endif
+typedef enum {
+    kRunning = 0,
+    kStopping = 1
+} lifecycle_t;
 
-#define PHP_UC_VERSION "1.0"
-#define PHP_UC_EXTNAME "uc"
+typedef struct {
+    size_t id;
+    lifecycle_t l;
+    uc_persistence_t* p;
+    pthread_mutex_t use_l;
+    pthread_mutex_t req_l;
+    pthread_cond_t req;
+    pthread_mutex_t resp_l;
+    pthread_cond_t resp;
+    pthread_cond_t* ow;
+    pthread_t td;
+    uc_metadata_t m;
+    size_t kl;
+    char k[MAX_KEY_LENGTH];
+    size_t vl;
+    char v[MAX_VALUE_SIZE];
+} worker_t;
 
-PHP_MINIT_FUNCTION(uc);
-PHP_MSHUTDOWN_FUNCTION(uc);
-PHP_RINIT_FUNCTION(uc);
+typedef struct {
+    size_t workers_count;
+    pthread_cond_t open_worker;
+    pthread_mutex_t open_worker_lock;
+    worker_t* workers;
+} worker_pool_t;
 
-PHP_FUNCTION(uc_test);
-PHP_FUNCTION(uc_compact);
-PHP_FUNCTION(uc_clear_cache);
-PHP_FUNCTION(uc_store);
-PHP_FUNCTION(uc_fetch);
-PHP_FUNCTION(uc_delete);
-PHP_FUNCTION(uc_inc);
-PHP_FUNCTION(uc_add);
-PHP_FUNCTION(uc_cas);
-
-extern zend_module_entry uc_module_entry;
-#define phpext_uc_prt &uc_module_entry
+int uc_workers_init(const uc_persistence_t* p, size_t workers_count, worker_pool_t** wp);
+int uc_workers_destroy(worker_pool_t* wp);
 
 #endif

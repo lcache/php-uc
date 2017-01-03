@@ -44,7 +44,12 @@ if test "$PHP_UC" != "no"; then
 
   PHP_SUBST(UC_SHARED_LIBADD)
 
-  PHP_NEW_EXTENSION(uc, uc.c, $ext_shared)
+  uc_sources="uc.c \
+              marshalling.c \
+              persistence.c \
+              workers.c "
+
+  PHP_NEW_EXTENSION(uc, $uc_sources, $ext_shared)
   AC_DEFINE(HAVE_UC, 1, [ ])
 fi
 

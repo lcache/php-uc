@@ -16,49 +16,20 @@
   +----------------------------------------------------------------------+
  */
 
-#ifndef PHP_UC_H
-#define PHP_UC_H 1
+#ifndef UC_PERSISTENCE_H
+#define UC_PERSISTENCE_H
 
-#ifdef ZTS
-#include "TSRM.h"
-#endif
+#include <rocksdb/c.h>
 
-#include "marshalling.h"
-#include "persistence.h"
-#include "workers.h"
+typedef struct {
+    rocksdb_t* db_h;
+    rocksdb_options_t* db_options;
+    rocksdb_options_t* cf_options;
+    rocksdb_compactionfilter_t* cfilter;
+    rocksdb_column_family_handle_t* cf_h;
+} uc_persistence_t;
 
-ZEND_BEGIN_MODULE_GLOBALS(uc)
-    zend_bool enabled;
-    long concurrency;
-    char* storage_directory;
-    uc_persistence_t persistence;
-    uc_worker_pool_t** workers;
-ZEND_END_MODULE_GLOBALS(uc)
-
-#ifdef ZTS
-#define UC_G(v) TSRMG(uc_globals_id, zend_uc_globals *, v)
-#else
-#define UC_G(v) (uc_globals.v)
-#endif
-
-#define PHP_UC_VERSION "1.0"
-#define PHP_UC_EXTNAME "uc"
-
-PHP_MINIT_FUNCTION(uc);
-PHP_MSHUTDOWN_FUNCTION(uc);
-PHP_RINIT_FUNCTION(uc);
-
-PHP_FUNCTION(uc_test);
-PHP_FUNCTION(uc_compact);
-PHP_FUNCTION(uc_clear_cache);
-PHP_FUNCTION(uc_store);
-PHP_FUNCTION(uc_fetch);
-PHP_FUNCTION(uc_delete);
-PHP_FUNCTION(uc_inc);
-PHP_FUNCTION(uc_add);
-PHP_FUNCTION(uc_cas);
-
-extern zend_module_entry uc_module_entry;
-#define phpext_uc_prt &uc_module_entry
+int uc_persistence_init(const char* storage_directory, uc_persistence_t* p);
+int uc_persistence_destroy(uc_persistence_t* p);
 
 #endif
