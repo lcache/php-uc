@@ -15,7 +15,7 @@ int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available)
         retval = pthread_mutex_trylock(&wp->workers[id].client_l);
         if (0 == retval) {
             *available = &wp->workers[id];
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Picked worker: %lu", id);
+            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Picked worker: %lu", id);
             break;
         }
         else if (EBUSY != retval) {
@@ -37,13 +37,6 @@ int uc_workers_complete_rpc(worker_t* w)
 {
     int retval;
 
-    // Prepare to wait on the req condition variable.
-    //retval = pthread_mutex_lock(&w->req_l);
-    //if (0 != retval) {
-    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_lock for req_l: %s", strerror(retval));
-    //    return retval;
-    //}
-
     // Signal to the worker to respond. The worker should already be waiting on
     // server and ready to obtain server_l.
     retval = pthread_cond_signal(&w->server);
@@ -58,15 +51,6 @@ int uc_workers_complete_rpc(worker_t* w)
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_lock for server_l: %s", strerror(retval));
         return retval;
     }
-
-    // @TODO: This seems to be a race condition if the worker sends the req signal before we wait for it.
-    // Wait for completion.
-    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Waiting on worker for req signal: %lu", w->id);
-    //retval = pthread_cond_wait(&w->req, &w->req_l);
-    //if (0 != retval) {
-    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_wait for req: %s", strerror(retval));
-    //    return retval;
-    //}
     return 0;
 }
 
@@ -85,7 +69,7 @@ int uc_workers_unlock(worker_t* w) {
         return retval;
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Unlocked worker %lu", w->id);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Unlocked worker %lu", w->id);
 
     // Let others know there's an open worker.
     //retval = pthread_cond_signal(available->ow);
@@ -142,7 +126,7 @@ static void* slot_worker(void *arg)
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->id);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->id);
 
         // Wait for a request.
         retval = pthread_cond_wait(&w->server, &w->server_l);
@@ -160,7 +144,7 @@ static void* slot_worker(void *arg)
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
 
         retval = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
         if (0 != retval) {
@@ -168,7 +152,7 @@ static void* slot_worker(void *arg)
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->id);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->id);
         // @TODO: Write anything back to the meta struct to signal success?
 
         //retval = pthread_cond_signal(&w->req);

@@ -258,7 +258,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     }
 
     // Copy the write into memory visible to the worker.
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Writing value size: %lu", ZSTR_LEN(val_s.s));
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Writing value size: %lu", ZSTR_LEN(val_s.s));
     memcpy(available->k, ZSTR_VAL(key), ZSTR_LEN(key));
     available->kl = ZSTR_LEN(key);
     memcpy(available->v, ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
@@ -273,7 +273,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         return 0;
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->id);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->id);
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Completed write on worker %lu", available->id);
 
     retval = uc_workers_unlock(available);
@@ -282,7 +282,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         return 0;
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Worker released: %lu", available->id);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Worker released: %lu", available->id);
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
