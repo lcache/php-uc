@@ -393,13 +393,12 @@ static void* slot_worker(void *arg)
 
         // @TODO: Write anything back to the meta struct to signal success?
 
-        //retval = pthread_cond_signal(&w->resp);
-        //if (0 != retval) {
-        //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_cond_signal on resp: %s", pthread_self(), strerror(retval));
-        //    return NULL;
-        //}
+        retval = pthread_cond_signal(&w->req);
+        if (0 != retval) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_cond_signal on req: %s", pthread_self(), strerror(retval));
+            return NULL;
+        }
 
-        // Unlock resp_l so the requester can acquire it.
         retval = pthread_mutex_unlock(&w->resp_l);
         if (0 != retval) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_unlock on loop: %s", pthread_self(), strerror(retval));
@@ -443,6 +442,11 @@ PHP_MINIT_FUNCTION(uc)
         return FAILURE;
     }
     for (int i = 0; i < UC_G(concurrency); i++) {
+        retval = pthread_mutex_init(&UC_G(workers)[i].use_l, &attr_mutex);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for use_l: %s", strerror(retval));
+            return FAILURE;
+        }
         retval = pthread_mutex_init(&UC_G(workers)[i].req_l, &attr_mutex);
         if (retval != 0) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for req_l: %s", strerror(retval));
@@ -698,16 +702,16 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         return 0;
     }
 
-    // Find a free worker.
+    // Find a free worker. Process/thread affinity would help here.
     int retval;
     worker_t* available = NULL;
     for (size_t i = 0; i < UC_G(concurrency); i++) {
-        retval = pthread_mutex_trylock(&UC_G(workers)[i].req_l);
+        retval = pthread_mutex_trylock(&UC_G(workers)[i].use_l);
         if (0 == retval) {
             available = &UC_G(workers)[i];
         }
         else if (EBUSY != retval) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_trylock: %s", strerror(retval));
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_trylock for use_l: %s", strerror(retval));
             return 0;
         }
     }
@@ -727,28 +731,30 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     available->m = meta;
     smart_str_free(&val_s);
 
-    // Signal to the worker to read the data.
+    // Prepare to wait on the req condition variable.
+    retval = pthread_mutex_lock(&available->req_l);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_lock for req_l: %s", strerror(retval));
+        return 0;
+    }
+
+    // Signal to the worker to respond.
     pthread_cond_signal(&available->resp);
 
     // Wait for completion.
-    retval = pthread_mutex_lock(&available->resp_l);
+    retval = pthread_cond_wait(&available->req, &available->req_l);
     if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_lock for resp_l: %s", strerror(retval));
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_wait: %s", strerror(retval));
         return 0;
     }
-    //retval = pthread_cond_wait(&available->resp, &available->resp_l);
-    //if (0 != retval) {
-    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_wait: %s", strerror(retval));
-    //    return 0;
-    //}
-    retval = pthread_mutex_unlock(&available->resp_l);
+    retval = pthread_mutex_unlock(&available->req_l);
     if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock for resp_l: %s", strerror(retval));
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock for req_l: %s", strerror(retval));
         return 0;
     }
 
-    // Unlock the worker for new requests.
-    retval = pthread_mutex_unlock(&available->req_l);
+    // We are no longer using this worker.
+    retval = pthread_mutex_unlock(&available->use_l);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock: %s", strerror(retval));
         return 0;
