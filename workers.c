@@ -5,37 +5,6 @@
 #include "workers.h"
 #include "persistence.h"
 
-int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, const char* val, size_t val_size, uc_metadata_t meta) {
-    int retval = 0;
-
-    // Generate the write batch.
-    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-
-    if (meta.op == kPut) {
-        rocksdb_writebatch_put_cf(wb, p->cf_h, key, key_len, val, val_size);
-    } else {
-        rocksdb_writebatch_merge_cf(wb, p->cf_h, key, key_len, val, val_size);
-    }
-
-    // Write the batch to storage.
-    char* err = NULL;
-    rocksdb_writeoptions_t* woptions;
-    woptions = rocksdb_writeoptions_create();
-    //rocksdb_writeoptions_disable_WAL(woptions, 1);
-    rocksdb_write(p->db_h, woptions, wb, &err);
-
-    if (NULL != err) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed rocksdb_write: %s", pthread_self(), err);
-        retval = EIO;
-    }
-
-    // Clean up.
-    rocksdb_writeoptions_destroy(woptions);
-    rocksdb_writebatch_destroy(wb);
-
-    return retval;
-}
-
 int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available)
 {
     int retval;
@@ -116,6 +85,37 @@ int uc_workers_unlock(worker_t* w) {
     //}
 
     return 0;
+}
+
+int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, const char* val, size_t val_size, uc_metadata_t meta) {
+    int retval = 0;
+
+    // Generate the write batch.
+    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
+
+    if (meta.op == kPut) {
+        rocksdb_writebatch_put_cf(wb, p->cf_h, key, key_len, val, val_size);
+    } else {
+        rocksdb_writebatch_merge_cf(wb, p->cf_h, key, key_len, val, val_size);
+    }
+
+    // Write the batch to storage.
+    char* err = NULL;
+    rocksdb_writeoptions_t* woptions;
+    woptions = rocksdb_writeoptions_create();
+    //rocksdb_writeoptions_disable_WAL(woptions, 1);
+    rocksdb_write(p->db_h, woptions, wb, &err);
+
+    if (NULL != err) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed rocksdb_write: %s", pthread_self(), err);
+        retval = EIO;
+    }
+
+    // Clean up.
+    rocksdb_writeoptions_destroy(woptions);
+    rocksdb_writebatch_destroy(wb);
+
+    return retval;
 }
 
 static void* slot_worker(void *arg)
