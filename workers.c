@@ -51,7 +51,10 @@ int uc_workers_complete_rpc(worker_t* w)
         return retval;
     }
 
+    // @TODO: This seems to be a race condition if the worker sends the req signal before we wait for it.
+
     // Wait for completion.
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Waiting on worker for req signal: %lu", w->id);
     retval = pthread_cond_wait(&w->req, &w->req_l);
     if (0 != retval) {
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_wait for req: %s", strerror(retval));
@@ -158,8 +161,7 @@ static void* slot_worker(void *arg)
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->id);
-
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete; sending req signal", w->id);
         // @TODO: Write anything back to the meta struct to signal success?
 
         retval = pthread_cond_signal(&w->req);

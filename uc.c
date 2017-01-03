@@ -31,6 +31,7 @@
 #include "zend_smart_str.h"
 #include "ext/standard/php_var.h"
 #include "SAPI.h"
+#include <syslog.h>
 
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
@@ -107,14 +108,14 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 
     int retval;
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Stopping workers...");
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Stopping workers...");
     retval = uc_workers_destroy(UC_G(pool));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_destroy: %s", strerror(retval));
         return FAILURE;
     }
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Closing persistence...");
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Closing persistence...");
     retval = uc_persistence_destroy(&UC_G(persistence));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_persistence_destroy: %s", strerror(retval));
@@ -271,12 +272,17 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_send_request: %s", strerror(retval));
         return 0;
     }
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Completed write on worker %lu", available->id);
+
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->id);
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Completed write on worker %lu", available->id);
+
     retval = uc_workers_unlock(available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_unlock: %s", strerror(retval));
         return 0;
     }
+
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Worker released: %lu", available->id);
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
