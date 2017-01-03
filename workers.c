@@ -293,7 +293,7 @@ int uc_workers_destroy(uc_worker_pool_t* wp)
     int retval;
     for (size_t id = 0; id < wp->workers_count; id++) {
         wp->workers[id].l = kStopping;
-        retval = pthread_cond_signal(&wp->workers[id].req);
+        retval = pthread_cond_signal(&wp->workers[id].resp);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_signal: %s", strerror(retval));
             return retval;

@@ -107,12 +107,14 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 
     int retval;
 
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Stopping workers...");
     retval = uc_workers_destroy(UC_G(pool));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_destroy: %s", strerror(retval));
         return FAILURE;
     }
 
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Closing persistence...");
     retval = uc_persistence_destroy(&UC_G(persistence));
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_persistence_destroy: %s", strerror(retval));
