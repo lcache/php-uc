@@ -11,10 +11,14 @@ A PHP extension providing an APCu-compatible API sufficient for LCache and built
         wget https://github.com/facebook/rocksdb/archive/v$RELEASE.tar.gz
         tar xzf https://github.com/facebook/rocksdb/archive/v$RELEASE.tar.gz
         cd rocksdb-$RELEASE
-        make shared_lib  # Would be better to make this static.
-    
+        make shared_lib
+        sudo make install-shared
+        #CFLAGS=-fPIC CXXFLAGS=-fPIC make static_lib
+        #sudo make install
+
 1. Build PHP User Cache:
 
         phpize
-        ./configure --with-rocksdb=$HOME/Sandbox/rocksdb-$RELEASE
-        
+        ./configure --enable-uc --with-rocksdb=$HOME/Sandbox/rocksdb-$RELEASE
+        make
+        sudo make install

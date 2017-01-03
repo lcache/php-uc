@@ -30,6 +30,9 @@
 #include "ext/standard/php_var.h"
 #include "SAPI.h"
 
+#include <sys/mman.h>
+#include <pthread.h>
+
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
 static zend_function_entry uc_functions[] = {
@@ -65,34 +68,10 @@ ZEND_GET_MODULE(uc)
 PHP_INI_BEGIN()
     STD_PHP_INI_BOOLEAN("uc.enabled", "1", PHP_INI_SYSTEM, OnUpdateBool, enabled, zend_uc_globals, uc_globals)
 	STD_PHP_INI_ENTRY("uc.storage_directory", "/var/tmp/php-uc", PHP_INI_SYSTEM, OnUpdateString, storage_directory, zend_uc_globals, uc_globals)
+    STD_PHP_INI_ENTRY("uc.concurrency", "16", PHP_INI_SYSTEM, OnUpdateLong, concurrency, zend_uc_globals, uc_globals)
 PHP_INI_END()
 
 #define UC_MAGIC 19840311
-
-typedef enum {
-    kPut = 0,
-    kInc = 1,
-    kAdd = 2,
-    kCAS = 3
-} uc_operation_t;
-
-typedef enum {
-    kNone = 0,
-    kSerialized = 1,
-    kLong = 2
-} uc_value_type_t;
-
-typedef struct {
-    uc_value_type_t value_type;
-    zend_long value;
-    zend_long cas_value_or_inc;
-    size_t ttl;
-    time_t created;
-    time_t modified;
-    uc_operation_t op;
-    size_t version;
-    uint32_t magic;
-} uc_metadata_t;
 
 static void php_uc_init_globals(zend_uc_globals *uc_globals)
 {
@@ -345,6 +324,92 @@ static char* merge_op_partial_merge(void* arg, const char* key, size_t key_lengt
     return result;
 }
 
+zend_bool worker_write(char* key, size_t key_len, char* val, size_t val_size, uc_metadata_t meta) {
+    zend_bool success = 1;
+
+    // Generate the write batch.
+    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
+
+    if (meta.op == kPut) {
+        rocksdb_writebatch_put_cf(wb, UC_G(cf_h), key, key_len, val, val_size);
+    } else {
+        rocksdb_writebatch_merge_cf(wb, UC_G(cf_h), key, key_len, val, val_size);
+    }
+
+    // Write the batch to storage.
+    char* err = NULL;
+    rocksdb_writeoptions_t* woptions;
+    woptions = rocksdb_writeoptions_create();
+    //rocksdb_writeoptions_disable_WAL(woptions, 1);
+    rocksdb_write(UC_G(db_h), woptions, wb, &err);
+
+    if (NULL != err) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed rocksdb_write: %s", pthread_self(), err);
+        success = 0;
+    }
+
+    // Clean up.
+    rocksdb_writeoptions_destroy(woptions);
+    rocksdb_writebatch_destroy(wb);
+
+    return success;
+}
+
+static void* slot_worker(void *arg)
+{
+    int retval;
+    int success;
+    worker_t *w = arg;
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "[%lu] Starting", pthread_self());
+
+    while(1) {
+        retval = pthread_mutex_lock(&w->resp_l);
+        if (0 != retval) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_lock: %s", pthread_self(), strerror(retval));
+            return NULL;
+        }
+
+        // Wait for a request.
+        retval = pthread_cond_wait(&w->resp, &w->resp_l);
+        if (0 != retval) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_cond_wait: %s", pthread_self(), strerror(retval));
+            return NULL;
+        }
+
+        if (kStopping == w->l) {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "[%lu] Stopping", pthread_self());
+            retval = pthread_mutex_unlock(&w->resp_l);
+            if (0 != retval) {
+                php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_unlock on stop: %s", pthread_self(), strerror(retval));
+            }
+            return NULL;
+        }
+
+        success = worker_write(w->k, w->kl, w->v, w->vl, w->m);
+        if (!success) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed worker_write", pthread_self());
+            return NULL;
+        }
+
+        // @TODO: Write anything back to the meta struct to signal success?
+
+        //retval = pthread_cond_signal(&w->resp);
+        //if (0 != retval) {
+        //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_cond_signal on resp: %s", pthread_self(), strerror(retval));
+        //    return NULL;
+        //}
+
+        // Unlock resp_l so the requester can acquire it.
+        retval = pthread_mutex_unlock(&w->resp_l);
+        if (0 != retval) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_unlock on loop: %s", pthread_self(), strerror(retval));
+            return NULL;
+        }
+    }
+
+    return NULL;
+}
+
 PHP_MINIT_FUNCTION(uc)
 {
     ZEND_INIT_MODULE_GLOBALS(uc, php_uc_init_globals, NULL);
@@ -352,6 +417,98 @@ PHP_MINIT_FUNCTION(uc)
 
     char* err = NULL;
 
+    // Initialize concurrency.
+    int retval;
+    UC_G(workers) = (worker_t*) mmap(NULL, sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t) + sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    UC_G(open_worker) = (pthread_cond_t*) UC_G(workers) + sizeof(worker_t) * UC_G(concurrency);
+    UC_G(open_worker_lock) = (pthread_mutex_t*) UC_G(workers) + sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t);
+
+    // Mutex attributes
+    pthread_mutexattr_t attr_mutex;
+    retval = pthread_mutexattr_init(&attr_mutex);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_init: %s", strerror(retval));
+        return FAILURE;
+    }
+    retval = pthread_mutexattr_setpshared(&attr_mutex, PTHREAD_PROCESS_SHARED);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_setpshared: %s", strerror(retval));
+        return FAILURE;
+    }
+
+    // Mutexes
+    retval = pthread_mutex_init(UC_G(open_worker_lock), &attr_mutex);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for open_worker_lock: %s", strerror(retval));
+        return FAILURE;
+    }
+    for (int i = 0; i < UC_G(concurrency); i++) {
+        retval = pthread_mutex_init(&UC_G(workers)[i].req_l, &attr_mutex);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for req_l: %s", strerror(retval));
+            return FAILURE;
+        }
+        retval = pthread_mutex_init(&UC_G(workers)[i].resp_l, &attr_mutex);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for resp_l: %s", strerror(retval));
+            return FAILURE;
+        }
+    }
+    retval = pthread_mutexattr_destroy(&attr_mutex);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_destroy: %s", strerror(retval));
+        return FAILURE;
+    }
+
+    // Condition variable attributes
+    pthread_condattr_t attr_cvar;
+    retval = pthread_condattr_init(&attr_cvar);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutexattr_init: %s", strerror(retval));
+        return FAILURE;
+    }
+    retval = pthread_condattr_setpshared(&attr_cvar, PTHREAD_PROCESS_SHARED);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_condattr_setpshared: %s", strerror(retval));
+        return FAILURE;
+    }
+
+    // Condition variables
+    retval = pthread_cond_init(UC_G(open_worker), &attr_cvar);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for open_worker: %s", strerror(retval));
+        return FAILURE;
+    }
+    for (int i = 0; i < UC_G(concurrency); i++) {
+        retval = pthread_cond_init(&UC_G(workers)[i].req, &attr_cvar);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for req: %s", strerror(retval));
+            return FAILURE;
+        }
+        retval = pthread_cond_init(&UC_G(workers)[i].resp, &attr_cvar);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for resp: %s", strerror(retval));
+            return FAILURE;
+        }
+
+    }
+    retval = pthread_condattr_destroy(&attr_cvar);
+    if (retval != 0) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_condattr_destroy: %s", strerror(retval));
+        return FAILURE;
+    }
+
+    // Threads
+    for (int i = 0; i < UC_G(concurrency); i++) {
+        UC_G(workers)[i].ow = UC_G(open_worker);
+        retval = pthread_create(&UC_G(workers)[i].td, NULL, &slot_worker, &UC_G(workers)[i]);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_create: %s", strerror(retval));
+            return FAILURE;
+        }
+    }
+
+    // Initialize the database.
     rocksdb_mergeoperator_t* merge_op;
     const char* cf_names[1] = {"default"};
     const rocksdb_options_t* cf_opts[1];
@@ -362,10 +519,10 @@ PHP_MINIT_FUNCTION(uc)
     cf_opts[0] = UC_G(cf_options);
 
     rocksdb_options_set_create_if_missing(UC_G(db_options), 1);
-    rocksdb_options_set_use_adaptive_mutex(UC_G(db_options), 1);
     rocksdb_options_set_create_missing_column_families(UC_G(db_options), 1);
-    rocksdb_options_set_compression(UC_G(db_options), /* rocksdb::kSnappyCompression */ 0x1);
-    //rocksdb_options_set_info_log_level(UC_G(db_options), /* InfoLogLevel::DEBUG_LEVEL */ 2);
+    //rocksdb_options_set_compression(UC_G(db_options), /* rocksdb::kSnappyCompression */ 0x1);
+    //rocksdb_options_set_allow_concurrent_memtable_write(UC_G(db_options), 0);
+    rocksdb_options_set_info_log_level(UC_G(db_options), /* InfoLogLevel::DEBUG_LEVEL */ 2);
 
     // Apply the TTL-enforcing compaction filter.
     UC_G(cfilter) = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);
@@ -397,6 +554,22 @@ PHP_MSHUTDOWN_FUNCTION(uc)
 {
     UNREGISTER_INI_ENTRIES();
 
+    // Stop workers
+    int retval;
+    for (int i = 0; i < UC_G(concurrency); i++) {
+        UC_G(workers)[i].l = kStopping;
+        retval = pthread_cond_signal(&UC_G(workers)[i].req);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_signal: %s", strerror(retval));
+            return FAILURE;
+        }
+        pthread_join(UC_G(workers)[i].td, NULL);
+        if (retval != 0) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_join: %s", strerror(retval));
+            return FAILURE;
+        }
+    }
+
     // @TODO: Record that there's been a clean shutdown.
 
     rocksdb_column_family_handle_destroy(UC_G(cf_h));
@@ -416,6 +589,9 @@ PHP_FUNCTION(uc_test)
 /* {{{ proto void uc_compact() */
 PHP_FUNCTION(uc_compact)
 {
+    // @TODO: Reimplement with workers.
+    RETURN_TRUE;
+
     rocksdb_compact_range_cf(UC_G(db_h), UC_G(cf_h), NULL, 0, NULL, 0);
     RETURN_TRUE;
 }
@@ -427,6 +603,9 @@ PHP_FUNCTION(uc_clear_cache)
     if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
+
+    // @TODO: Reimplement with workers.
+    RETURN_TRUE;
 
     char *err = NULL;
     rocksdb_writeoptions_t* woptions;
@@ -508,35 +687,81 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 3");
 
-    // Generate the write batch.
-    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-
-    if (meta.op == kPut) {
-        rocksdb_writebatch_put_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
-    } else {
-        rocksdb_writebatch_merge_cf(wb, UC_G(cf_h), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
-    }
-
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 4");
-
-    // Write the batch to storage.
-    char *err = NULL;
-    rocksdb_writeoptions_t* woptions;
-    woptions = rocksdb_writeoptions_create();
-    //rocksdb_writeoptions_disable_WAL(woptions, 1);
-    rocksdb_write(UC_G(db_h), woptions, wb, &err);
-
-    // Clean up.
-    rocksdb_writeoptions_destroy(woptions);
-    rocksdb_writebatch_destroy(wb);
-    smart_str_free(&val_s);
-
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
-
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: %s", err);
+    if (ZSTR_LEN(key) > MAX_KEY_LENGTH) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: key length %lu > %lu", ZSTR_LEN(key), MAX_KEY_LENGTH);
+        smart_str_free(&val_s);
         return 0;
     }
+    if (ZSTR_LEN(val_s.s) > MAX_VALUE_SIZE) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: value size %lu > %lu", ZSTR_LEN(val_s.s), MAX_VALUE_SIZE);
+        smart_str_free(&val_s);
+        return 0;
+    }
+
+    // Find a free worker.
+    int retval;
+    worker_t* available = NULL;
+    for (size_t i = 0; i < UC_G(concurrency); i++) {
+        retval = pthread_mutex_trylock(&UC_G(workers)[i].req_l);
+        if (0 == retval) {
+            available = &UC_G(workers)[i];
+        }
+        else if (EBUSY != retval) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_trylock: %s", strerror(retval));
+            return 0;
+        }
+    }
+
+    // @TODO: Add handling to wait on the open_workers condition variable and try again.
+    if (NULL == available) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: no workers available");
+        smart_str_free(&val_s);
+        return 0;
+    }
+
+    // Copy the write into memory visible to the worker.
+    memcpy(available->k, ZSTR_VAL(key), ZSTR_LEN(key));
+    available->kl = ZSTR_LEN(key);
+    memcpy(available->v, ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
+    available->vl = ZSTR_LEN(val_s.s);
+    available->m = meta;
+    smart_str_free(&val_s);
+
+    // Signal to the worker to read the data.
+    pthread_cond_signal(&available->resp);
+
+    // Wait for completion.
+    retval = pthread_mutex_lock(&available->resp_l);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_lock for resp_l: %s", strerror(retval));
+        return 0;
+    }
+    //retval = pthread_cond_wait(&available->resp, &available->resp_l);
+    //if (0 != retval) {
+    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_wait: %s", strerror(retval));
+    //    return 0;
+    //}
+    retval = pthread_mutex_unlock(&available->resp_l);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock for resp_l: %s", strerror(retval));
+        return 0;
+    }
+
+    // Unlock the worker for new requests.
+    retval = pthread_mutex_unlock(&available->req_l);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock: %s", strerror(retval));
+        return 0;
+    }
+
+    // Let others know there's an open worker.
+    retval = pthread_cond_signal(available->ow);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_signal on ow: %s", strerror(retval));
+        return 0;
+    }
+
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
     return 1;
 }

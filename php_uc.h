@@ -24,6 +24,55 @@
 #endif
 
 #include <rocksdb/c.h>
+#include <pthread.h>
+
+#define MAX_KEY_LENGTH 512
+#define MAX_VALUE_SIZE 2097152
+
+typedef enum {
+    kPut = 0,
+    kInc = 1,
+    kAdd = 2,
+    kCAS = 3
+} uc_operation_t;
+
+typedef enum {
+    kNone = 0,
+    kSerialized = 1,
+    kLong = 2
+} uc_value_type_t;
+
+typedef struct {
+    uc_value_type_t value_type;
+    long value;
+    long cas_value_or_inc;
+    size_t ttl;
+    time_t created;
+    time_t modified;
+    uc_operation_t op;
+    size_t version;
+    uint32_t magic;
+} uc_metadata_t;
+
+typedef enum {
+    kRunning = 0,
+    kStopping = 1
+} lifecycle_t;
+
+typedef struct {
+    lifecycle_t l;
+    pthread_mutex_t req_l;
+    pthread_cond_t req;
+    pthread_mutex_t resp_l;
+    pthread_cond_t resp;
+    pthread_cond_t* ow;
+    pthread_t td;
+    uc_metadata_t m;
+    size_t kl;
+    char k[MAX_KEY_LENGTH];
+    size_t vl;
+    char v[MAX_VALUE_SIZE];
+} worker_t;
 
 ZEND_BEGIN_MODULE_GLOBALS(uc)
     zend_bool enabled;
@@ -33,6 +82,10 @@ ZEND_BEGIN_MODULE_GLOBALS(uc)
     rocksdb_options_t* cf_options;
     rocksdb_compactionfilter_t* cfilter;
     rocksdb_column_family_handle_t* cf_h;
+    long concurrency;
+    worker_t* workers;
+    pthread_cond_t* open_worker;
+    pthread_mutex_t* open_worker_lock;
 ZEND_END_MODULE_GLOBALS(uc)
 
 #ifdef ZTS
