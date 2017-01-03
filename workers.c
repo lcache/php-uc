@@ -12,14 +12,14 @@ int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available)
 
     // @TODO: Process/thread affinity would help here.
     for (size_t id = 0; id < wp->workers_count; id++) {
-        retval = pthread_mutex_trylock(&wp->workers[id].use_l);
+        retval = pthread_mutex_trylock(&wp->workers[id].client_l);
         if (0 == retval) {
             *available = &wp->workers[id];
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Picked worker: %lu", id);
             break;
         }
         else if (EBUSY != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_trylock for use_l: %s", strerror(retval));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_trylock for client_l: %s", strerror(retval));
             return retval;
         }
     }
@@ -45,22 +45,21 @@ int uc_workers_complete_rpc(worker_t* w)
     //}
 
     // Signal to the worker to respond. The worker should already be waiting on
-    // req and ready to obtain req_l.
-    retval = pthread_cond_signal(&w->req);
+    // server and ready to obtain server_l.
+    retval = pthread_cond_signal(&w->server);
     if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_signal for resp: %s", strerror(retval));
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_signal for server: %s", strerror(retval));
         return retval;
     }
 
-    // When the worker completes, it will release req_l, allowing us to proceed.
-    retval = pthread_mutex_lock(&w->req_l);
+    // When the worker completes, it will release server_l, allowing us to proceed.
+    retval = pthread_mutex_lock(&w->server_l);
     if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_lock for req_l: %s", strerror(retval));
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_lock for server_l: %s", strerror(retval));
         return retval;
     }
 
     // @TODO: This seems to be a race condition if the worker sends the req signal before we wait for it.
-
     // Wait for completion.
     //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Waiting on worker for req signal: %lu", w->id);
     //retval = pthread_cond_wait(&w->req, &w->req_l);
@@ -74,13 +73,13 @@ int uc_workers_complete_rpc(worker_t* w)
 int uc_workers_unlock(worker_t* w) {
     int retval;
 
-    retval = pthread_mutex_unlock(&w->req_l);
+    retval = pthread_mutex_unlock(&w->server_l);
     if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock for req_l: %s", strerror(retval));
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock for server_l: %s", strerror(retval));
         return retval;
     }
 
-    retval = pthread_mutex_unlock(&w->use_l);
+    retval = pthread_mutex_unlock(&w->client_l);
     if (0 != retval) {
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock: %s", strerror(retval));
         return retval;
@@ -137,7 +136,7 @@ static void* slot_worker(void *arg)
     syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Starting", w->id);
 
     while(1) {
-        retval = pthread_mutex_lock(&w->req_l);
+        retval = pthread_mutex_lock(&w->server_l);
         if (0 != retval) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_lock: %s", w->id, strerror(retval));
             return NULL;
@@ -146,7 +145,7 @@ static void* slot_worker(void *arg)
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->id);
 
         // Wait for a request.
-        retval = pthread_cond_wait(&w->req, &w->req_l);
+        retval = pthread_cond_wait(&w->server, &w->server_l);
         if (0 != retval) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_cond_wait: %s", w->id, strerror(retval));
             return NULL;
@@ -154,7 +153,7 @@ static void* slot_worker(void *arg)
 
         if (kStopping == w->l) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Stopping", w->id);
-            retval = pthread_mutex_unlock(&w->req_l);
+            retval = pthread_mutex_unlock(&w->server_l);
             if (0 != retval) {
                 syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on stop: %s", w->id, strerror(retval));
             }
@@ -178,7 +177,7 @@ static void* slot_worker(void *arg)
         //    return NULL;
         //}
 
-        retval = pthread_mutex_unlock(&w->req_l);
+        retval = pthread_mutex_unlock(&w->server_l);
         if (0 != retval) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on loop: %s", w->id, strerror(retval));
             return NULL;
@@ -221,19 +220,14 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
     //    return FAILURE;
     //}
     for (int i = 0; i < workers_count; i++) {
-        retval = pthread_mutex_init(&pool->workers[i].use_l, &attr_mutex);
+        retval = pthread_mutex_init(&pool->workers[i].client_l, &attr_mutex);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_init for use_l: %s", strerror(retval));
             return retval;
         }
-        retval = pthread_mutex_init(&pool->workers[i].req_l, &attr_mutex);
+        retval = pthread_mutex_init(&pool->workers[i].server_l, &attr_mutex);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_init for req_l: %s", strerror(retval));
-            return retval;
-        }
-        retval = pthread_mutex_init(&pool->workers[i].resp_l, &attr_mutex);
-        if (retval != 0) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_init for resp_l: %s", strerror(retval));
             return retval;
         }
     }
@@ -263,14 +257,9 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
     //    return retval;
     //}
     for (size_t i = 0; i < workers_count; i++) {
-        retval = pthread_cond_init(&pool->workers[i].req, &attr_cvar);
+        retval = pthread_cond_init(&pool->workers[i].server, &attr_cvar);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_init for req: %s", strerror(retval));
-            return retval;
-        }
-        retval = pthread_cond_init(&pool->workers[i].resp, &attr_cvar);
-        if (retval != 0) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_init for resp: %s", strerror(retval));
             return retval;
         }
 
@@ -303,7 +292,7 @@ int uc_workers_destroy(uc_worker_pool_t* wp)
     int retval;
     for (size_t id = 0; id < wp->workers_count; id++) {
         wp->workers[id].l = kStopping;
-        retval = pthread_cond_signal(&wp->workers[id].req);
+        retval = pthread_cond_signal(&wp->workers[id].server);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_cond_signal: %s", strerror(retval));
             return retval;

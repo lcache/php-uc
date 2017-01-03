@@ -35,11 +35,9 @@ typedef struct {
     size_t id;
     lifecycle_t l;
     const uc_persistence_t* p;
-    pthread_mutex_t use_l;
-    pthread_mutex_t req_l;
-    pthread_cond_t req;
-    pthread_mutex_t resp_l;
-    pthread_cond_t resp;
+    pthread_mutex_t client_l;
+    pthread_mutex_t server_l;
+    pthread_cond_t server;
     pthread_cond_t* ow;
     pthread_t td;
     uc_metadata_t m;
