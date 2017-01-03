@@ -60,6 +60,7 @@ typedef enum {
 } lifecycle_t;
 
 typedef struct {
+    size_t i;
     lifecycle_t l;
     pthread_mutex_t use_l;
     pthread_mutex_t req_l;

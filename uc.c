@@ -32,6 +32,7 @@
 
 #include <sys/mman.h>
 #include <pthread.h>
+#include <syslog.h>
 
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
@@ -344,7 +345,7 @@ zend_bool worker_write(char* key, size_t key_len, char* val, size_t val_size, uc
     rocksdb_write(UC_G(db_h), woptions, wb, &err);
 
     if (NULL != err) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed rocksdb_write: %s", pthread_self(), err);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed rocksdb_write: %s", pthread_self(), err);
         success = 0;
     }
 
@@ -360,48 +361,54 @@ static void* slot_worker(void *arg)
     int retval;
     int success;
     worker_t *w = arg;
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "[%lu] Starting", pthread_self());
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Starting", w->i);
 
     while(1) {
         retval = pthread_mutex_lock(&w->resp_l);
         if (0 != retval) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_lock: %s", pthread_self(), strerror(retval));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_lock: %s", w->i, strerror(retval));
             return NULL;
         }
+
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->i);
 
         // Wait for a request.
         retval = pthread_cond_wait(&w->resp, &w->resp_l);
         if (0 != retval) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_cond_wait: %s", pthread_self(), strerror(retval));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_cond_wait: %s", w->i, strerror(retval));
             return NULL;
         }
 
         if (kStopping == w->l) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "[%lu] Stopping", pthread_self());
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "[%lu] Stopping", w->i);
             retval = pthread_mutex_unlock(&w->resp_l);
             if (0 != retval) {
-                php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_unlock on stop: %s", pthread_self(), strerror(retval));
+                syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on stop: %s", w->i, strerror(retval));
             }
             return NULL;
         }
 
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->i);
+
         success = worker_write(w->k, w->kl, w->v, w->vl, w->m);
         if (!success) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed worker_write", pthread_self());
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write", w->i);
             return NULL;
         }
+
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->i);
 
         // @TODO: Write anything back to the meta struct to signal success?
 
         retval = pthread_cond_signal(&w->req);
         if (0 != retval) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_cond_signal on req: %s", pthread_self(), strerror(retval));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_cond_signal on req: %s", w->i, strerror(retval));
             return NULL;
         }
 
         retval = pthread_mutex_unlock(&w->resp_l);
         if (0 != retval) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "[%lu] Failed pthread_mutex_unlock on loop: %s", pthread_self(), strerror(retval));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on loop: %s", w->i, strerror(retval));
             return NULL;
         }
     }
@@ -416,11 +423,13 @@ PHP_MINIT_FUNCTION(uc)
 
     char* err = NULL;
 
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing concurrency: %lu", UC_G(concurrency));
+
     // Initialize concurrency.
     int retval;
     UC_G(workers) = (worker_t*) mmap(NULL, sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t) + sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    UC_G(open_worker) = (pthread_cond_t*) UC_G(workers) + sizeof(worker_t) * UC_G(concurrency);
-    UC_G(open_worker_lock) = (pthread_mutex_t*) UC_G(workers) + sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t);
+    //UC_G(open_worker) = (pthread_cond_t*) (UC_G(workers) + sizeof(worker_t) * UC_G(concurrency));
+    //UC_G(open_worker_lock) = (pthread_mutex_t*) (UC_G(workers) + sizeof(worker_t) * UC_G(concurrency) + sizeof(pthread_cond_t));
 
     // Mutex attributes
     pthread_mutexattr_t attr_mutex;
@@ -436,11 +445,11 @@ PHP_MINIT_FUNCTION(uc)
     }
 
     // Mutexes
-    retval = pthread_mutex_init(UC_G(open_worker_lock), &attr_mutex);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for open_worker_lock: %s", strerror(retval));
-        return FAILURE;
-    }
+    //retval = pthread_mutex_init(UC_G(open_worker_lock), &attr_mutex);
+    //if (retval != 0) {
+    //   php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_init for open_worker_lock: %s", strerror(retval));
+    //    return FAILURE;
+    //}
     for (int i = 0; i < UC_G(concurrency); i++) {
         retval = pthread_mutex_init(&UC_G(workers)[i].use_l, &attr_mutex);
         if (retval != 0) {
@@ -478,11 +487,11 @@ PHP_MINIT_FUNCTION(uc)
     }
 
     // Condition variables
-    retval = pthread_cond_init(UC_G(open_worker), &attr_cvar);
-    if (retval != 0) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for open_worker: %s", strerror(retval));
-        return FAILURE;
-    }
+    //retval = pthread_cond_init(UC_G(open_worker), &attr_cvar);
+    //if (retval != 0) {
+    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_init for open_worker: %s", strerror(retval));
+    //    return FAILURE;
+    //}
     for (int i = 0; i < UC_G(concurrency); i++) {
         retval = pthread_cond_init(&UC_G(workers)[i].req, &attr_cvar);
         if (retval != 0) {
@@ -503,8 +512,9 @@ PHP_MINIT_FUNCTION(uc)
     }
 
     // Threads
-    for (int i = 0; i < UC_G(concurrency); i++) {
+    for (size_t i = 0; i < UC_G(concurrency); i++) {
         UC_G(workers)[i].ow = UC_G(open_worker);
+        UC_G(workers)[i].i = i;
         retval = pthread_create(&UC_G(workers)[i].td, NULL, &slot_worker, &UC_G(workers)[i]);
         if (retval != 0) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_create: %s", strerror(retval));
@@ -709,6 +719,8 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         retval = pthread_mutex_trylock(&UC_G(workers)[i].use_l);
         if (0 == retval) {
             available = &UC_G(workers)[i];
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Picked worker: %lu", i);
+            break;
         }
         else if (EBUSY != retval) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_trylock for use_l: %s", strerror(retval));
@@ -747,6 +759,9 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_wait: %s", strerror(retval));
         return 0;
     }
+
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->i);
+
     retval = pthread_mutex_unlock(&available->req_l);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_mutex_unlock for req_l: %s", strerror(retval));
@@ -760,12 +775,14 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         return 0;
     }
 
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Unlocked worker %lu", available->i);
+
     // Let others know there's an open worker.
-    retval = pthread_cond_signal(available->ow);
-    if (0 != retval) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_signal on ow: %s", strerror(retval));
-        return 0;
-    }
+    //retval = pthread_cond_signal(available->ow);
+    //if (0 != retval) {
+    //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed pthread_cond_signal on ow: %s", strerror(retval));
+    //    return 0;
+    //}
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
