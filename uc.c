@@ -32,9 +32,6 @@
 #include "ext/standard/php_var.h"
 #include "SAPI.h"
 
-#include <pthread.h>
-#include <syslog.h>
-
 ZEND_DECLARE_MODULE_GLOBALS(uc)
 
 static zend_function_entry uc_functions[] = {
@@ -132,9 +129,9 @@ PHP_FUNCTION(uc_test)
 
 zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
     uc_init_metadata(&meta);
-    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
     smart_str_appendl(val, (const char *) &meta, sizeof(meta));
-    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
     //uc_print_metadata(ZSTR_VAL(val->s), ZSTR_LEN(val->s));
     return 1;
 }
@@ -258,6 +255,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     }
 
     // Copy the write into memory visible to the worker.
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Writing value size: %lu", ZSTR_LEN(val_s.s));
     memcpy(available->k, ZSTR_VAL(key), ZSTR_LEN(key));
     available->kl = ZSTR_LEN(key);
     memcpy(available->v, ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s));
@@ -271,7 +269,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_send_request: %s", strerror(retval));
         return 0;
     }
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->id);
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Completed write on worker %lu", available->id);
     retval = uc_workers_unlock(available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_unlock: %s", strerror(retval));

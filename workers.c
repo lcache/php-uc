@@ -5,7 +5,7 @@
 #include "workers.h"
 #include "persistence.h"
 
-int worker_write(const uc_persistence_t* p, char* key, size_t key_len, char* val, size_t val_size, uc_metadata_t meta) {
+int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, const char* val, size_t val_size, uc_metadata_t meta) {
     int retval = 0;
 
     // Generate the write batch.
@@ -152,9 +152,9 @@ static void* slot_worker(void *arg)
 
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
 
-        success = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
-        if (!success) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write", w->id);
+        retval = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write: %s", w->id, strerror(retval));
             return NULL;
         }
 
@@ -275,6 +275,7 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
     for (size_t id = 0; id < workers_count; id++) {
         pool->workers[id].ow = &pool->open_worker;
         pool->workers[id].id = id;
+        pool->workers[id].p = p;
         retval = pthread_create(&pool->workers[id].td, NULL, &slot_worker, &pool->workers[id]);
         if (retval != 0) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_create: %s", strerror(retval));

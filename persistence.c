@@ -10,11 +10,11 @@ static const char* uc_filter_name(void* arg) { return "ttl"; }
 static unsigned char uc_filter_filter(void* arg, int level, const char* key, size_t key_length, const char* existing_value, size_t value_length,
                                       char** new_value, size_t* new_value_length, unsigned char* value_changed) {
     uc_metadata_t meta;
-    int status_ok;
+    int retval;
 
-    status_ok = uc_read_metadata(existing_value, value_length, &meta);
+    retval = uc_read_metadata(existing_value, value_length, &meta);
     // Keep entries on parsing failure.
-    if (!status_ok) {
+    if (0 != retval) {
         return 0;
     }
 
@@ -189,7 +189,7 @@ int uc_persistence_init(const char* storage_directory, uc_persistence_t* p)
     merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
     rocksdb_options_set_merge_operator(p->cf_options, merge_op);
 
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to open the database.");
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "About to open the database.");
 
     p->db_h = rocksdb_open_column_families(p->db_options, storage_directory, 1, cf_names, cf_opts, cfs_h, &err);
     p->cf_h = cfs_h[0];

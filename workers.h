@@ -34,7 +34,7 @@ typedef enum {
 typedef struct {
     size_t id;
     lifecycle_t l;
-    uc_persistence_t* p;
+    const uc_persistence_t* p;
     pthread_mutex_t use_l;
     pthread_mutex_t req_l;
     pthread_cond_t req;
