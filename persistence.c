@@ -186,9 +186,9 @@ int uc_persistence_init(const char* storage_directory, uc_persistence_t* p)
 
     rocksdb_options_set_create_if_missing(p->db_options, 1);
     rocksdb_options_set_create_missing_column_families(p->db_options, 1);
-    rocksdb_options_set_compression(p->db_options, /* rocksdb::kSnappyCompression */ 0x1);
+    //rocksdb_options_set_compression(p->db_options, /* rocksdb::kSnappyCompression */ 0x1);
     //rocksdb_options_set_allow_concurrent_memtable_write(p->db_options, 0);
-    rocksdb_options_set_info_log_level(p->db_options, /* InfoLogLevel::DEBUG_LEVEL */ 2);
+    //rocksdb_options_set_info_log_level(p->db_options, /* InfoLogLevel::DEBUG_LEVEL */ 2);
 
     // Apply the TTL-enforcing compaction filter.
     p->cfilter = rocksdb_compactionfilter_create(NULL, uc_filter_destory, uc_filter_filter, uc_filter_name);

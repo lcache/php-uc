@@ -274,14 +274,13 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
     *wp = NULL;
 
     size_t mmap_size = sizeof(uc_worker_pool_t) + sizeof(worker_t) * workers_count;
-    int fd;
-    char mmap_template[] = "/tmp/php-uc.XXXXXX";
+    //int fd;
+    //char mmap_template[] = "/tmp/php-uc.XXXXXX";
 
-    fd = mkstemp(mmap_template);
-    posix_fallocate(fd, 0, mmap_size);
-    // @TODO: Change back to MAP_ANONYMOUS?
-    pool = (uc_worker_pool_t*) mmap(0, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, fd, 0);
-    close(fd);
+    //fd = mkstemp(mmap_template);
+    //posix_fallocate(fd, 0, mmap_size);
+    pool = (uc_worker_pool_t*) mmap(0, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    //close(fd);
 
     pool->workers_count = workers_count;
 
