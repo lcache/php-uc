@@ -12,17 +12,22 @@ static unsigned char uc_filter_filter(void* arg, int level, const char* key, siz
     uc_metadata_t meta;
     int retval;
 
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: filtering key: %s", key);
+
     retval = uc_read_metadata(existing_value, value_length, &meta);
     // Keep entries on parsing failure.
     if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "uc_filter_filter: failed uc_read_metadata: %s; retaining", strerror(retval));
         return 0;
     }
 
     // Prune stale entries with TTLs.
     if (!uc_metadata_is_fresh(meta, time(NULL))) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: removing");
         return 1;
     }
 
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: retaining");
     return 0;
 }
 
@@ -34,10 +39,11 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
     uc_metadata_t meta = {0};
     uc_metadata_t merge_op_meta;
     int status_ok;
+    int retval;
     const char* new_data;
     size_t new_data_len;
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Attempting full merge.");
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "merge_op_full_merge: attempting full merge");
 
     if (existing_value != NULL) {
         status_ok = uc_strip_metadata(existing_value, &existing_value_length, &meta);
@@ -49,7 +55,7 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
         }
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Loaded existing value.");
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "merge_op_full_merge: loaded existing value");
 
     // In the degenerate case of no operands, succeed and return the original value.
     *success = 1;
@@ -58,10 +64,11 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
 
     // Iterate through the merge operands.
     for (size_t i = 0; i < num_operands; i++) {
-        status_ok = uc_read_metadata(operands_list[i], operands_list_length[i], &merge_op_meta);
+        retval = uc_read_metadata(operands_list[i], operands_list_length[i], &merge_op_meta);
 
         // Fail on invalid metadata.
-        if (!status_ok) {
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "merge_op_full_merge: failed uc_read_metadata: %s", strerror(retval));
             *success = 0;
             return NULL;
         }
@@ -76,7 +83,7 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
                 meta.created = meta.modified;
             }
 
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "New value: %ld", meta.value);
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "merge_op_full_merge: new value: %ld", meta.value);
 
             // Counters never have anything outside metadata.
             new_data = NULL;
@@ -103,7 +110,7 @@ static char* merge_op_full_merge(void* arg, const char* key, size_t key_length, 
                 new_data_len = 0;
             }
         } else {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Unknown meta.op: %d", meta.op);
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "merge_op_full_merge: unknown meta.op: %d", meta.op);
 
             // Unexpected value for meta.op.
             *success = 0;
@@ -127,21 +134,23 @@ static char* merge_op_partial_merge(void* arg, const char* key, size_t key_lengt
     uc_metadata_t meta;
     long net_counter_value = 0;
     int status_ok;
+    int retval;
 
     syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Attempting partial merge.");
 
     for (size_t i = 0; i < num_operands; i++) {
-        status_ok = uc_read_metadata(operands_list[i], operands_list_length[i], &meta);
+        retval = uc_read_metadata(operands_list[i], operands_list_length[i], &meta);
 
         // Fail on invalid metadata.
-        if (!status_ok) {
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "merge_op_partial_merge: failed uc_read_metadata: %s", strerror(retval));
             *success = 0;
             return NULL;
         }
 
         // Fail on encountering anything other than increment operations.
         if (meta.op != kInc) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Non-kInc operation: failing partial merge");
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "merge_op_partial_merge: non-kInc operation, abandoning partial merge");
             *success = 0;
             return NULL;
         }
@@ -186,8 +195,9 @@ int uc_persistence_init(const char* storage_directory, uc_persistence_t* p)
     rocksdb_options_set_compaction_filter(p->cf_options, p->cfilter);
 
     // Apply the merge operator.
-    merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
-    rocksdb_options_set_merge_operator(p->cf_options, merge_op);
+    // @TODO: Re-enable
+    //merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
+    //rocksdb_options_set_merge_operator(p->cf_options, merge_op);
 
     //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "About to open the database.");
 

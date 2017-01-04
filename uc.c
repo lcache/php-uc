@@ -130,13 +130,13 @@ PHP_FUNCTION(uc_test)
     RETURN_STRING("UC Test");
 }
 
-zend_bool uc_append_metadata(smart_str* val, uc_metadata_t meta) {
+int uc_append_metadata(smart_str* val, uc_metadata_t meta) {
     uc_init_metadata(&meta);
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Before (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
     smart_str_appendl(val, (const char *) &meta, sizeof(meta));
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "After (%lu): %s", ZSTR_LEN(val->s), ZSTR_VAL(val->s));
     //uc_print_metadata(ZSTR_VAL(val->s), ZSTR_LEN(val->s));
-    return 1;
+    return 0;
 }
 
 /* {{{ proto void uc_compact() */
@@ -184,8 +184,8 @@ time_t uc_time() {
 /* }}} */
 
 /* {{{ uc_cache_store */
-zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc_operation_t op, const zend_long cas_value_or_inc, const zend_long new_cas_value) {
-    zend_bool status;
+int uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc_operation_t op, const zend_long cas_value_or_inc, const zend_long new_cas_value) {
+    int retval = 0;
     uc_metadata_t meta = {0};
     smart_str val_s = {0};
 
@@ -229,9 +229,11 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     meta.modified = uc_time();
     meta.created = meta.modified;
     meta.ttl = ttl;
-    status = uc_append_metadata(&val_s, meta);
-    if (!status) {
-        return status;
+    retval = uc_append_metadata(&val_s, meta);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "uc_cache_store: failed uc_append_metadata: %s", strerror(retval));
+        smart_str_free(&val_s);
+        return retval;
     }
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 3");
@@ -239,23 +241,24 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     if (ZSTR_LEN(key) > MAX_KEY_LENGTH) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: key length %lu > %lu", ZSTR_LEN(key), MAX_KEY_LENGTH);
         smart_str_free(&val_s);
-        return 0;
+        return EINVAL;
     }
     if (ZSTR_LEN(val_s.s) > MAX_VALUE_SIZE) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: value size %lu > %lu", ZSTR_LEN(val_s.s), MAX_VALUE_SIZE);
         smart_str_free(&val_s);
-        return 0;
+        return EINVAL;
     }
 
     // Find a free worker.
     worker_t* available;
-    int retval;
     retval = uc_workers_choose_and_lock(UC_G(pool), &available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_choose_and_lock: %s", strerror(retval));
         smart_str_free(&val_s);
-        return 0;
+        return retval;
     }
+
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_cache_store: worker %lu acquired for PID %d.", available->id, getpid());
 
     // Copy the write into memory visible to the worker.
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Writing value size: %lu", ZSTR_LEN(val_s.s));
@@ -270,23 +273,21 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
     retval = uc_workers_complete_rpc(available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_send_request: %s", strerror(retval));
-        return 0;
+        return EIO;
     }
-
+    // @TODO: Read confirmation here?
     //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Completed write on worker %lu", available->id);
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Completed write on worker %lu", available->id);
-
     retval = uc_workers_unlock(available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_unlock: %s", strerror(retval));
-        return 0;
+        return retval;
     }
 
     //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Worker released: %lu", available->id);
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 5");
 
-    return 1;
+    return 0;
 }
 /* }}} */
 
@@ -294,7 +295,7 @@ zend_bool uc_cache_store(zend_string *key, const zval *val, const size_t ttl, co
  */
 static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const uc_operation_t op)
 {
-    // @TODO: Add RocksDB batch support for array writes.
+    int retval;
     zval *key = NULL;
     zval *val = NULL;
     zend_long ttl = 0L;
@@ -324,7 +325,9 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const uc_operation_t o
 		    zend_hash_internal_pointer_reset_ex(hash, &hpos);
 		    while((hentry = zend_hash_get_current_data_ex(hash, &hpos))) {
 		        if (zend_hash_get_current_key_ex(hash, &hkey, &hkey_idx, &hpos) == HASH_KEY_IS_STRING) {
-		            if(!uc_cache_store(hkey, hentry, (uint32_t) ttl, op, 0, 0)) {
+                    retval = uc_cache_store(hkey, hentry, (uint32_t) ttl, op, 0, 0);
+		            if(0 != retval) {
+                        php_error_docref(NULL TSRMLS_CC, E_ERROR, "uc_store insertion error: %s", strerror(retval));
 		                add_assoc_long_ex(return_value, hkey->val, hkey->len, -1);  /* -1: insertion error */
 		            }
 		        } else {
@@ -340,7 +343,8 @@ static void uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const uc_operation_t o
     	            RETURN_FALSE;
     	        }
                 /* return true on success */
-    			if(uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, op, 0, 0)) {
+                retval = uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, op, 0, 0);
+    			if(0 == retval) {
     	            RETURN_TRUE;
                 }
     		} else {
@@ -371,6 +375,7 @@ PHP_FUNCTION(uc_add) {
 /* {{{ proto long apc_inc(string key [, long step [, bool& success]])
  */
 PHP_FUNCTION(uc_inc) {
+    int retval;
     zend_string *key;
     zend_long step = 1;
     zval *success = NULL;
@@ -385,7 +390,8 @@ PHP_FUNCTION(uc_inc) {
 	}
 
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_inc(%d)", step);
-    if (uc_cache_store(key, NULL, 0, kInc, step, 0)) {
+    retval = uc_cache_store(key, NULL, 0, kInc, step, 0);
+    if (0 == retval) {
         if (success) {
 			ZVAL_TRUE(success);
 		}
@@ -402,6 +408,7 @@ PHP_FUNCTION(uc_inc) {
 /* {{{ proto int apc_cas(string key, int old, int new)
  */
 PHP_FUNCTION(uc_cas) {
+    int retval;
     zend_string *key;
     zend_long vals[2];
     zval *new_val;
@@ -412,8 +419,8 @@ PHP_FUNCTION(uc_cas) {
 
     php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cas 1");
 
-
-    if (uc_cache_store(key, NULL, 0, kCAS, vals[0], vals[1])) {
+    retval = uc_cache_store(key, NULL, 0, kCAS, vals[0], vals[1]);
+    if (0 == retval) {
 		RETURN_TRUE;
 	}
 

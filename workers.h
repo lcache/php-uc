@@ -31,13 +31,21 @@ typedef enum {
     kStopping = 1
 } lifecycle_t;
 
+typedef enum {
+    kWaitingOnClient = 0,
+    kWaitingOnServer = 1
+} uc_request_lifecycle_t;
+
 typedef struct {
     size_t id;
     lifecycle_t l;
+    uc_request_lifecycle_t rl;
     const uc_persistence_t* p;
-    pthread_mutex_t client_l;
+    pthread_mutex_t in_use_l;
     pthread_mutex_t server_l;
     pthread_cond_t server;
+    pthread_mutex_t client_l;
+    pthread_cond_t client;
     pthread_cond_t* ow;
     pthread_t td;
     uc_metadata_t m;
