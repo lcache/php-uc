@@ -42,11 +42,11 @@ int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available)
 
     // Reset the worker's structure.
     // @TODO: Only run this for debugging.
-    memset(&(*available)->m, 0, sizeof(uc_metadata_t));
-    (*available)->kl = 0;
-    memset(&(*available)->k, 0, MAX_KEY_LENGTH);
-    (*available)->vl = 0;
-    memset(&(*available)->v, 0, MAX_VALUE_SIZE);
+    //memset(&(*available)->m, 0, sizeof(uc_metadata_t));
+    //(*available)->kl = 0;
+    //memset(&(*available)->k, 0, MAX_KEY_LENGTH);
+    //(*available)->vl = 0;
+    //memset(&(*available)->v, 0, MAX_VALUE_SIZE);
     return 0;
 }
 
@@ -297,8 +297,11 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutexattr_setpshared: %s", strerror(retval));
         return retval;
     }
-
-    pthread_mutexattr_settype(&attr_mutex, PTHREAD_MUTEX_ERRORCHECK);
+    retval = pthread_mutexattr_settype(&attr_mutex, PTHREAD_MUTEX_ADAPTIVE_NP);  // PTHREAD_MUTEX_ERRORCHECK
+    if (retval != 0) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutexattr_settype: %s", strerror(retval));
+        return retval;
+    }
 
     // Mutexes
     //retval = pthread_mutex_init(UC_G(open_worker_lock), &attr_mutex);
