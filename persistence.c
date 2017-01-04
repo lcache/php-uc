@@ -12,7 +12,7 @@ static unsigned char uc_filter_filter(void* arg, int level, const char* key, siz
     uc_metadata_t meta;
     int retval;
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: filtering key: %s", key);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: filtering key: %s", key);
 
     retval = uc_read_metadata(existing_value, value_length, &meta);
     // Keep entries on parsing failure.
@@ -23,11 +23,11 @@ static unsigned char uc_filter_filter(void* arg, int level, const char* key, siz
 
     // Prune stale entries with TTLs.
     if (!uc_metadata_is_fresh(meta, time(NULL))) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: removing");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: removing");
         return 1;
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: retaining");
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_filter_filter: retaining");
     return 0;
 }
 
@@ -186,7 +186,7 @@ int uc_persistence_init(const char* storage_directory, uc_persistence_t* p)
 
     rocksdb_options_set_create_if_missing(p->db_options, 1);
     rocksdb_options_set_create_missing_column_families(p->db_options, 1);
-    //rocksdb_options_set_compression(p->db_options, /* rocksdb::kSnappyCompression */ 0x1);
+    rocksdb_options_set_compression(p->db_options, /* rocksdb::kSnappyCompression */ 0x1);
     //rocksdb_options_set_allow_concurrent_memtable_write(p->db_options, 0);
     rocksdb_options_set_info_log_level(p->db_options, /* InfoLogLevel::DEBUG_LEVEL */ 2);
 
@@ -195,9 +195,8 @@ int uc_persistence_init(const char* storage_directory, uc_persistence_t* p)
     rocksdb_options_set_compaction_filter(p->cf_options, p->cfilter);
 
     // Apply the merge operator.
-    // @TODO: Re-enable
-    //merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
-    //rocksdb_options_set_merge_operator(p->cf_options, merge_op);
+    merge_op = rocksdb_mergeoperator_create(NULL, merge_op_destroy, merge_op_full_merge, merge_op_partial_merge, NULL, merge_op_name);
+    rocksdb_options_set_merge_operator(p->cf_options, merge_op);
 
     //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "About to open the database.");
 

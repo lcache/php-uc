@@ -33,6 +33,13 @@ int uc_workers_choose_and_lock(uc_worker_pool_t* wp, worker_t** available)
         return EIO;
     }
 
+    // Acquire the lock in order to write.
+    retval = pthread_mutex_lock(&(*available)->server_l);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_choose_and_lock: failed pthread_mutex_lock for server_l: %s", strerror(retval));
+        return retval;
+    }
+
     // Reset the worker's structure.
     // @TODO: Only run this for debugging.
     memset(&(*available)->m, 0, sizeof(uc_metadata_t));
@@ -69,16 +76,9 @@ int uc_workers_complete_rpc(worker_t* w)
     }
     */
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_workers_complete_rpc: acquiring client lock for worker %lu", w->id);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_workers_complete_rpc: acquiring client lock for worker %lu", w->id);
 
-    // Acquire the lock in order to pthread_cond_wait below.
-    retval = pthread_mutex_lock(&w->client_l);
-    if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: failed pthread_mutex_lock for server_l: %s", strerror(retval));
-        return retval;
-    }
-
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_workers_complete_rpc: sending signal to the server %lu", w->id);
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_workers_complete_rpc: sending signal to the server %lu", w->id);
 
     // Signal to the worker to respond. The worker should already be waiting on
     // server and ready to obtain server_l once we release it in
@@ -90,13 +90,34 @@ int uc_workers_complete_rpc(worker_t* w)
         return retval;
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_workers_complete_rpc: waiting for signal from worker %lu to client", w->id);
+    // We are done writing, so we can release the lock.
+    retval = pthread_mutex_unlock(&w->server_l);
+    if (0 != retval) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: pthread_mutex_unlock: %s", strerror(retval));
+        return retval;
+    }
 
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_workers_complete_rpc: waiting for signal from worker %lu to client", w->id);
+
+
+    // Wait on a state change. pthread_cond_wait will also release server_l.
     while (kWaitingOnServer == w->l) {
-        retval = pthread_cond_wait(&w->client, &w->client_l);
+        // Re-acquire the lock so we can wait on the CV.
+        retval = pthread_mutex_lock(&w->server_l);
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: failed pthread_mutex_lock: %s", strerror(retval));
+            return retval;
+        }
+        retval = pthread_cond_wait(&w->server, &w->server_l);
         if (0 != retval) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: failed pthread_cond_wait for server: %s", strerror(retval));
             return 0;
+        }
+        // Unlock in preparation for a fresh lock to wait on the CV.
+        retval = pthread_mutex_unlock(&w->server_l);
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: pthread_mutex_unlock: %s", strerror(retval));
+            return retval;
         }
     }
 
@@ -108,11 +129,11 @@ int uc_workers_complete_rpc(worker_t* w)
 int uc_workers_unlock(worker_t* w) {
     int retval;
 
-    retval = pthread_mutex_unlock(&w->client_l);
-    if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock for server_l: %s", strerror(retval));
-        return retval;
-    }
+    //retval = pthread_mutex_unlock(&w->server_l);
+    //if (0 != retval) {
+    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutex_unlock for server_l: %s", strerror(retval));
+    //    return retval;
+    //}
 
     retval = pthread_mutex_unlock(&w->in_use_l);
     if (0 != retval) {
@@ -155,7 +176,7 @@ int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, con
     char* err = NULL;
     rocksdb_writeoptions_t* woptions;
     woptions = rocksdb_writeoptions_create();
-    //rocksdb_writeoptions_disable_WAL(woptions, 1);
+    rocksdb_writeoptions_disable_WAL(woptions, 1);
     rocksdb_write(p->db_h, woptions, wb, &err);
 
     if (NULL != err) {
@@ -177,16 +198,15 @@ static void* slot_worker(void *arg)
     worker_t *w = arg;
     syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Starting", w->id);
 
-    retval = pthread_mutex_lock(&w->server_l);
-    if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_lock: %s", w->id, strerror(retval));
-        return NULL;
-    }
-
     while(1) {
+        retval = pthread_mutex_lock(&w->server_l);
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_lock: %s", w->id, strerror(retval));
+            return NULL;
+        }
 
         while (kWaitingOnClient == w->rl && kRunning == w->l) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->id);
+            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Waiting", w->id);
             // Wait for a request (unlocks server_l).
             retval = pthread_cond_wait(&w->server, &w->server_l);
             if (0 != retval) {
@@ -204,16 +224,16 @@ static void* slot_worker(void *arg)
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Validating metadata", w->id);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Validating metadata", w->id);
 
         // Validate metadata.
         retval = uc_read_metadata(w->v, w->vl, NULL);
         if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] slot_worker: uc_read_metadata: %s", pthread_self(), strerror(retval));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] slot_worker: uc_read_metadata: %s", w->id, strerror(retval));
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
 
         retval = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
         if (0 != retval) {
@@ -221,23 +241,23 @@ static void* slot_worker(void *arg)
             return NULL;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->id);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->id);
         // @TODO: Write anything back to the meta struct to signal success?
 
         w->rl = kWaitingOnClient;
 
         // Let the client know the request is complete.
-        retval = pthread_cond_signal(&w->client);
+        retval = pthread_cond_signal(&w->server);
         if (0 != retval) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] failed pthread_cond_signal for client: %s", w->id, strerror(retval));
             return NULL;
         }
 
-        //retval = pthread_mutex_unlock(&w->server_l);
-        //if (0 != retval) {
-        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on loop: %s", w->id, strerror(retval));
-        //    return NULL;
-        //}
+        retval = pthread_mutex_unlock(&w->server_l);
+        if (0 != retval) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed pthread_mutex_unlock on loop: %s", w->id, strerror(retval));
+            return NULL;
+        }
     }
 
     return NULL;

@@ -258,7 +258,7 @@ int uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc
         return retval;
     }
 
-    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_cache_store: worker %lu acquired for PID %d.", available->id, getpid());
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "uc_cache_store: worker %lu acquired for PID %d.", available->id, getpid());
 
     // Copy the write into memory visible to the worker.
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Writing value size: %lu", ZSTR_LEN(val_s.s));
