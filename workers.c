@@ -55,11 +55,11 @@ int uc_workers_complete_rpc(worker_t* w)
     int retval;
 
     // Validate metadata.
-    retval = uc_read_metadata(w->v, w->vl, NULL);
-    if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: failed uc_read_metadata: %s", strerror(retval));
-        return retval;
-    }
+    //retval = uc_read_metadata(w->v, w->vl, NULL);
+    //if (0 != retval) {
+    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_workers_complete_rpc: failed uc_read_metadata: %s", strerror(retval));
+    //    return retval;
+    //}
 
     // Verify that server_l is not currently held.
     // @TODO: Remove this when not debugging.
@@ -160,11 +160,11 @@ int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, con
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
 
     // Validate metadata.
-    retval = uc_read_metadata(val, val_size, NULL);
-    if (0 != retval) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_write: uc_read_metadata: %s", pthread_self(), strerror(retval));
-        return retval;
-    }
+    //retval = uc_read_metadata(val, val_size, NULL);
+    //if (0 != retval) {
+    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_write: uc_read_metadata: %s", pthread_self(), strerror(retval));
+    //    return retval;
+    //}
 
     if (meta.op == kPut) {
         rocksdb_writebatch_put_cf(wb, p->cf_h, key, key_len, val, val_size);
@@ -266,6 +266,10 @@ static void* slot_worker(void *arg)
 int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_pool_t** wp)
 {
     syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Initializing concurrency: %lu", workers_count);
+
+    size_t comp = sizeof(worker_t) - sizeof(size_t) * 2 - MAX_KEY_LENGTH - MAX_VALUE_SIZE;
+
+    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "worker_t needs padding: %lu", comp % 8);
 
     // Initialize concurrency.
     int retval;
