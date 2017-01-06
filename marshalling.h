@@ -27,7 +27,9 @@ typedef enum {
     kPut = 0,
     kInc = 1,
     kAdd = 2,
-    kCAS = 3
+    kCAS = 3,
+    kGet = 4,
+    kDelete = 5
 } uc_operation_t;
 
 typedef enum {
@@ -48,10 +50,10 @@ typedef struct {
     uint32_t magic;
 } uc_metadata_t;
 
-int uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta);
+int uc_read_metadata(const char* val, size_t val_size, uc_metadata_t* meta);
 int uc_metadata_is_fresh(uc_metadata_t meta, time_t now);
-int uc_strip_metadata(const char* val, size_t *val_len, uc_metadata_t* meta);
+int uc_strip_metadata(const char* val, size_t* val_size, uc_metadata_t* meta);
 int uc_init_metadata(uc_metadata_t* meta);
-void uc_print_metadata(const char *val, size_t val_len);
+void uc_print_metadata(const char *val, size_t val_size);
 
 #endif

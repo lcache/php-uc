@@ -22,7 +22,7 @@ int uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
     memcpy(&m, (void *) (val + val_len - sizeof(m)), sizeof(m));
 
     if (m.magic != UC_MAGIC) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "uc_read_metadata: magic number (%u) does not match expected value (%u).", m.magic, UC_MAGIC);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "uc_read_metadata: magic number (%u) does not match expected value (%u).", m.magic, UC_MAGIC);
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Size: %zu", val_len);
         //for(size_t i=0; i < val_len; i++) {
@@ -42,16 +42,24 @@ int uc_read_metadata(const char* val, size_t val_len, uc_metadata_t* meta) {
     }
 
     if (m.op == kCAS && m.value_type != kLong) {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Inc or CAS operation has non-long value type: %d", m.value_type);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Inc or CAS operation has non-long value type: %d", m.value_type);
         return EINVAL;
     }
 
     if (m.op == kInc || m.op == kCAS || m.value_type == kNone) {
         if (val_len > sizeof(m)) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Inc or CAS operation has extra bytes: %lu", val_len - sizeof(m));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Inc or CAS operation has extra bytes: %lu", val_len - sizeof(m));
             return EINVAL;
         }
     }
+
+    if (m.op == kDelete && m.value_type != kNone) {
+        if (val_len > sizeof(m)) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Delete operation has a value.");
+            return EINVAL;
+        }
+    }
+
 
     if (NULL != meta) {
         *meta = m;

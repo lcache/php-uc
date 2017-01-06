@@ -193,30 +193,38 @@ int uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store");
 
+    if (ZSTR_LEN(key) > MAX_KEY_LENGTH) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: key length %lu > %lu", ZSTR_LEN(key), MAX_KEY_LENGTH);
+        return EINVAL;
+    }
+
     if (meta.op == kCAS || meta.op == kInc) {
         meta.cas_value_or_inc = cas_value_or_inc;
     }
 
     if (meta.op == kCAS) {
+        // CAS operations must use long values.
         meta.value = new_cas_value;
         meta.value_type = kLong;
     }
     else if (val == NULL) {
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone");
         meta.value_type = kNone;
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kNone 2");
     }
     else if (Z_TYPE_P(val) == IS_LONG) {
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kLong");
         meta.value_type = kLong;
         meta.value = Z_LVAL_P(val);
     } else {
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "kSerialized");
         meta.value_type = kSerialized;
         php_serialize_data_t var_hash;
         PHP_VAR_SERIALIZE_INIT(var_hash);
         php_var_serialize(&val_s, (zval*) val, &var_hash);
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
+    }
+
+    if (ZSTR_LEN(val_s.s) > MAX_VALUE_SIZE) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: value size %lu > %lu", ZSTR_LEN(val_s.s), MAX_VALUE_SIZE);
+        smart_str_free(&val_s);
+        return EINVAL;
     }
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 2");
@@ -237,17 +245,6 @@ int uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc
     }
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 3");
-
-    if (ZSTR_LEN(key) > MAX_KEY_LENGTH) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: key length %lu > %lu", ZSTR_LEN(key), MAX_KEY_LENGTH);
-        smart_str_free(&val_s);
-        return EINVAL;
-    }
-    if (ZSTR_LEN(val_s.s) > MAX_VALUE_SIZE) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: value size %lu > %lu", ZSTR_LEN(val_s.s), MAX_VALUE_SIZE);
-        smart_str_free(&val_s);
-        return EINVAL;
-    }
 
     // Find a free worker.
     worker_t* available;
@@ -429,68 +426,88 @@ PHP_FUNCTION(uc_cas) {
 /* }}} */
 
 /* {{{ uc_cache_fetch */
-zend_bool uc_cache_fetch(zend_string *key, time_t t, zval **dst)
+int uc_cache_fetch(zend_string *key, time_t t, zval **dst)
 {
-    char* err = NULL;
-    rocksdb_readoptions_t* roptions;
-    rocksdb_column_family_handle_t* cf_h;
-    uc_metadata_t meta;
-    char* val_s;
-    size_t val_s_len;
-    zend_bool status_ok = 0;
+    int retval = 0;
 
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_fetch");
-
-    roptions = rocksdb_readoptions_create();
-    val_s = rocksdb_get_cf(UC_G(persistence).db_h, roptions, UC_G(persistence).cf_h, ZSTR_VAL(key), ZSTR_LEN(key), &val_s_len, &err);
-    rocksdb_readoptions_destroy(roptions);
-
-    // A NULL is a miss.
-    if (val_s == NULL) {
+    if (ZSTR_LEN(key) > MAX_KEY_LENGTH) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to fetch from user cache: key length %lu > %lu", ZSTR_LEN(key), MAX_KEY_LENGTH);
+        retval = EINVAL;
         goto cleanup;
     }
 
-    // Parse metadata.
-    status_ok = uc_strip_metadata(val_s, &val_s_len, &meta);
-    if (!status_ok) {
-        php_error_docref(NULL, E_WARNING, "Error parsing metadata.");
+    // Find a free worker.
+    worker_t* available;
+    retval = uc_workers_choose_and_lock(UC_G(pool), &available);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_choose_and_lock: %s", strerror(retval));
         goto cleanup;
     }
 
-    // Miss on stale data. No need to explicitly delete;
-    // the next compaction will handle deleting stale data.
-    if (!uc_metadata_is_fresh(meta, uc_time())) {
+    // Create a request to read a key.
+    uc_metadata_t meta = {0};
+    meta.op = kGet;
+    memcpy(available->k, ZSTR_VAL(key), ZSTR_LEN(key));
+    available->kl = ZSTR_LEN(key);
+    available->m = meta;
+
+    // Complete the RPC
+    retval = uc_workers_complete_rpc(available);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_send_request: %s", strerror(retval));
+        retval = EIO;
         goto cleanup;
     }
 
+    char* val_s = available->v;
+    size_t val_s_size = available->vl;
+
+    // A size of zero indicates a miss.
+    // @TODO: Do this more semantically.
+    if (0 == val_s_size) {
+        ZVAL_FALSE(*dst);
+        goto cleanup;
+    }
+
+    // Isolate metadata.
+    retval = uc_strip_metadata(val_s, &val_s_size, &meta);
+    if (0 != retval) {
+        php_error_docref(NULL, E_WARNING, "Failed uc_strip_metadata: %s", strerror(retval));
+        goto cleanup;
+    }
+
+    // Parse the value.
     if (meta.value_type == kLong) {
-        ZVAL_LONG(*dst, meta.value);
+        ZVAL_LONG(*dst, available->m.value);
     }
     else if (meta.value_type == kSerialized) {
         const unsigned char *tmp = (unsigned char *) val_s;
         php_unserialize_data_t var_hash;
         PHP_VAR_UNSERIALIZE_INIT(var_hash);
-        if(!php_var_unserialize(*dst, &tmp, (unsigned char *) val_s + val_s_len, &var_hash)) {
+        if(!php_var_unserialize(*dst, &tmp, (unsigned char *) val_s + val_s_size, &var_hash)) {
             PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
-            php_error_docref(NULL, E_WARNING, "Error unserializing at offset %ld of %ld bytes", (zend_long)(tmp - (unsigned char *) val_s), (zend_long)val_s_len);
+            php_error_docref(NULL, E_WARNING, "Error unserializing at offset %ld of %ld bytes", (zend_long)(tmp - (unsigned char *) val_s), (zend_long)val_s_size);
             goto cleanup;
         }
         PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
     } else {
         php_error_docref(NULL, E_WARNING, "Unknown value type: %lu", meta.value_type);
+        retval = EINVAL;
         goto cleanup;
     }
 
-    status_ok = 1;
+    retval = uc_workers_unlock(available);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_unlock: %s", strerror(retval));
+        goto cleanup;
+    }
+
+    //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Worker released: %lu", available->id);
 
 cleanup:
-    rocksdb_free(val_s);
-    if (!status_ok) {
-        ZVAL_NULL(*dst);
-    }
-    return status_ok;
-} /* }}} */
-
+    return retval;
+}
+/* }}} */
 
 /* {{{ proto mixed uc_fetch(mixed key[, bool &success])
  */
@@ -521,7 +538,7 @@ PHP_FUNCTION(uc_fetch) {
 
 	if (Z_TYPE_P(key) == IS_ARRAY || (Z_TYPE_P(key) == IS_STRING && Z_STRLEN_P(key) > 0)) {
 		if (Z_TYPE_P(key) == IS_STRING) {
-			if (uc_cache_fetch(Z_STR_P(key), t, &return_value)) {
+			if (0 == uc_cache_fetch(Z_STR_P(key), t, &return_value)) {
 			    if (success) {
 					ZVAL_TRUE(success);
 				}
@@ -539,7 +556,7 @@ PHP_FUNCTION(uc_fetch) {
 						*iresult = &result_entry;
 					ZVAL_UNDEF(iresult);
 
-					if (uc_cache_fetch(Z_STR_P(hentry), t, &iresult)) {
+					if (0 == uc_cache_fetch(Z_STR_P(hentry), t, &iresult)) {
 					    add_assoc_zval(&result, Z_STRVAL_P(hentry), &result_entry);
 					}
 			    } else {
@@ -566,19 +583,11 @@ PHP_FUNCTION(uc_fetch) {
 /* {{{ uc_cache_delete */
 zend_bool uc_cache_delete(zend_string *key)
 {
-    char *err = NULL;
-    rocksdb_writeoptions_t* woptions;
+    int retval;
+    retval = uc_cache_store(key, NULL, 0, kDelete, 0, 0);
 
-    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-    rocksdb_writebatch_delete_cf(wb, UC_G(persistence).cf_h, ZSTR_VAL(key), ZSTR_LEN(key));
-    woptions = rocksdb_writeoptions_create();
-    //rocksdb_writeoptions_disable_WAL(woptions, 1);
-    rocksdb_write(UC_G(persistence).db_h, woptions, wb, &err);
-    rocksdb_writeoptions_destroy(woptions);
-    rocksdb_writebatch_destroy(wb);
-
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to delete from user cache: %s", err);
+    if (0 != retval) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_cache_store: %s", strerror(retval));
         return 0;
     }
 

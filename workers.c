@@ -153,38 +153,79 @@ int uc_workers_unlock(worker_t* w) {
     return 0;
 }
 
-int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, const char* val, size_t val_size, uc_metadata_t meta) {
+
+int worker_get(const uc_persistence_t* p, const char* key, size_t key_len, char* val, size_t* val_size)
+{
     int retval = 0;
+    char* err = NULL;
+    rocksdb_readoptions_t* roptions = rocksdb_readoptions_create();
+    char* value;
+    value = rocksdb_get_cf(p->db_h, roptions, p->cf_h, key, key_len, val_size, &err);
 
-    // Generate the write batch.
+    if (NULL != err) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_get: failed rocksdb_get_cf: %s", pthread_self(), err);
+        rocksdb_free(err);
+        retval = EIO;
+        goto cleanup;
+    }
+
+    // Miss
+    // @TODO: Communicate this more semantically.
+    if (NULL == value) {
+        *val_size = 0;
+    }
+
+    if (*val_size > MAX_VALUE_SIZE) {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_get: stored data size (%lu) is more than the max a worker can handle (%lu)", pthread_self(), *val_size, MAX_VALUE_SIZE);
+        retval = ENOMEM;
+        goto cleanup;
+    }
+
+    if (*val_size > 0) {
+        memcpy(val, value, *val_size);
+    }
+
+cleanup:
+    rocksdb_readoptions_destroy(roptions);
+    rocksdb_free(value);
+
+    return retval;
+}
+
+
+int worker_write(const uc_persistence_t* p, const char* key, size_t key_len, const char* val, const size_t val_size, const uc_metadata_t meta)
+{
+    int retval = 0;
+    char* err = NULL;
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-
-    // Validate metadata.
-    //retval = uc_read_metadata(val, val_size, NULL);
-    //if (0 != retval) {
-    //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_write: uc_read_metadata: %s", pthread_self(), strerror(retval));
-    //    return retval;
-    //}
+    rocksdb_writeoptions_t* woptions = rocksdb_writeoptions_create();
 
     if (meta.op == kPut) {
         rocksdb_writebatch_put_cf(wb, p->cf_h, key, key_len, val, val_size);
-    } else {
+    }
+    else if (meta.op == kDelete) {
+        rocksdb_writebatch_delete_cf(wb, p->cf_h, key, key_len);
+    }
+    else if (meta.op == kInc || meta.op == kAdd || meta.op == kCAS) {
         rocksdb_writebatch_merge_cf(wb, p->cf_h, key, key_len, val, val_size);
+    }
+    else {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_write: invalid operation: %d", pthread_self(), meta.op);
+        retval = EINVAL;
+        goto cleanup;
     }
 
     // Write the batch to storage.
-    char* err = NULL;
-    rocksdb_writeoptions_t* woptions;
-    woptions = rocksdb_writeoptions_create();
     rocksdb_writeoptions_disable_WAL(woptions, 1);
     rocksdb_write(p->db_h, woptions, wb, &err);
 
     if (NULL != err) {
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] worker_write: failed rocksdb_write: %s", pthread_self(), err);
+        rocksdb_free(err);
         retval = EIO;
     }
 
-    // Clean up.
+cleanup:
     rocksdb_writeoptions_destroy(woptions);
     rocksdb_writebatch_destroy(wb);
 
@@ -227,18 +268,26 @@ static void* slot_worker(void *arg)
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Validating metadata", w->id);
 
         // Validate metadata.
-        retval = uc_read_metadata(w->v, w->vl, NULL);
-        if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] slot_worker: uc_read_metadata: %s", w->id, strerror(retval));
-            return NULL;
-        }
+        //retval = uc_read_metadata(w->v, w->vl, NULL);
+        //if (0 != retval) {
+        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] slot_worker: uc_read_metadata: %s", w->id, strerror(retval));
+        //    return NULL;
+        //}
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Processing write", w->id);
 
-        retval = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
-        if (0 != retval) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write: %s", w->id, strerror(retval));
-            return NULL;
+        if (w->m.op == kGet) {
+            retval = worker_get(w->p, w->k, w->kl, w->v, &w->vl);
+            if (0 != retval) {
+                syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_get: %s", w->id, strerror(retval));
+                return NULL;
+            }
+        } else {
+            retval = worker_write(w->p, w->k, w->kl, w->v, w->vl, w->m);
+            if (0 != retval) {
+                syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "[%lu] Failed worker_write: %s", w->id, strerror(retval));
+                return NULL;
+            }
         }
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "[%lu] Write complete", w->id);

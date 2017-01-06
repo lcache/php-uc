@@ -23,8 +23,8 @@
 #include "marshalling.h"
 #include "persistence.h"
 
-#define MAX_KEY_LENGTH 512
-#define MAX_VALUE_SIZE 2097152
+#define MAX_KEY_LENGTH ((size_t) 512)
+#define MAX_VALUE_SIZE ((size_t) 2097152)
 
 typedef enum {
     kRunning = 0,
