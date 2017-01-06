@@ -353,8 +353,8 @@ int uc_workers_init(const uc_persistence_t* p, size_t workers_count, uc_worker_p
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutexattr_setpshared: %s", strerror(retval));
         return retval;
     }
-    //retval = pthread_mutexattr_settype(&attr_mutex, PTHREAD_MUTEX_ADAPTIVE_NP);
-    retval = pthread_mutexattr_settype(&attr_mutex, PTHREAD_MUTEX_ERRORCHECK);
+    retval = pthread_mutexattr_settype(&attr_mutex, PTHREAD_MUTEX_ADAPTIVE_NP);
+    //retval = pthread_mutexattr_settype(&attr_mutex, PTHREAD_MUTEX_ERRORCHECK);
     if (retval != 0) {
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_ERR), "Failed pthread_mutexattr_settype: %s", strerror(retval));
         return retval;
