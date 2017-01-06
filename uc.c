@@ -219,12 +219,11 @@ int uc_cache_store(zend_string *key, const zval *val, const size_t ttl, const uc
         PHP_VAR_SERIALIZE_INIT(var_hash);
         php_var_serialize(&val_s, (zval*) val, &var_hash);
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
-    }
-
-    if (ZSTR_LEN(val_s.s) > MAX_VALUE_SIZE) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed to store to user cache: value size %lu > %lu", ZSTR_LEN(val_s.s), MAX_VALUE_SIZE);
-        smart_str_free(&val_s);
-        return EINVAL;
+        if (ZSTR_LEN(val_s.s) > MAX_VALUE_SIZE) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Serialized value size %lu > %lu", ZSTR_LEN(val_s.s), MAX_VALUE_SIZE);
+            smart_str_free(&val_s);
+            return EINVAL;
+        }
     }
 
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cache_store 2");
@@ -437,7 +436,7 @@ int uc_cache_fetch(zend_string *key, time_t t, zval **dst)
     }
 
     // Find a free worker.
-    worker_t* available;
+    worker_t* available = NULL;
     retval = uc_workers_choose_and_lock(UC_G(pool), &available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_choose_and_lock: %s", strerror(retval));
@@ -496,15 +495,14 @@ int uc_cache_fetch(zend_string *key, time_t t, zval **dst)
         goto cleanup;
     }
 
+cleanup:
     retval = uc_workers_unlock(available);
     if (0 != retval) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_workers_unlock: %s", strerror(retval));
-        goto cleanup;
     }
 
     //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_NOTICE), "Worker released: %lu", available->id);
 
-cleanup:
     return retval;
 }
 /* }}} */
