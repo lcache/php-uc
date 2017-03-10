@@ -1,0 +1,13 @@
+language: php
+
+php:
+    - 7.0
+    - 7.1
+    - nightly
+
+script:
+    - wget
+    - phpize
+    - ./configure --enable-uc --with-rocksdb=./rocksdb/
+    - make
+
