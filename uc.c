@@ -144,7 +144,7 @@ int
 uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_bool exclusive)
 {
     char* err;
-    int success = 0;
+    int success       = 0;
     smart_str val_s   = { 0 };
     time_t expiration = 0;
 
@@ -154,7 +154,8 @@ uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_b
 
     // @TODO: As for fetch, relocate this code to the storage layer.
     if (Z_TYPE_P(val) == IS_LONG) {
-        success = uc_storage_store_long(UC_G(storage), ZSTR_VAL(key), Z_LVAL_P(val), ZSTR_LEN(val_s.s), expiration, exclusive, &err);
+        success = uc_storage_store_long(UC_G(storage), ZSTR_VAL(key), Z_LVAL_P(val), ZSTR_LEN(val_s.s), expiration,
+                                        exclusive, &err);
         if (err != NULL) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store_long: %s", err);
             uc_string_free(err);
@@ -166,7 +167,7 @@ uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_b
         php_var_serialize(&val_s, (zval*) val, &var_hash);
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
         success = uc_storage_store(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s),
-                                  expiration, exclusive, &err);
+                                   expiration, exclusive, &err);
         if (err != NULL) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store: %s", err);
             uc_string_free(err);
