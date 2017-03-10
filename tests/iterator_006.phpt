@@ -52,6 +52,8 @@ function print_it($it, $idx) {
 ?>
 ===DONE===
 <?php exit(0); ?>
+--XFAIL--
+UCIterator not yet implemented
 --EXPECTF--
 IT #0
 ============================

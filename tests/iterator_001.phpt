@@ -21,6 +21,8 @@ var_dump($keys);
 ?>
 ===DONE===
 <?php exit(0); ?>
+--XFAIL--
+UCIterator not yet implemented
 --EXPECT--
 array(41) {
   ["key0"]=>

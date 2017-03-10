@@ -12,4 +12,5 @@ A PHP extension providing an APCu-compatible API built on Boost Interprocess.
         phpize
         ./configure --enable-uc
         make
+        make test
         sudo make install

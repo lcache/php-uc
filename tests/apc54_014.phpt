@@ -36,6 +36,8 @@ for ($i = 0; $i < 10; $i++) {
 }
 echo 'done';
 
+--XFAIL--
+uc.preload_path not yet implemented
 --EXPECT--
 bool(true)
 string(3) "123"

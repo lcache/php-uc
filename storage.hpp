@@ -44,7 +44,7 @@ int uc_storage_store_long(uc_storage_t st_opaque,
                      char** errptr);
 
 void uc_storage_clear(uc_storage_t st_opaque, char** errptr);
-void uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr);
+int uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr);
 void uc_string_free(char* strptr);
 size_t uc_storage_size(uc_storage_t st_opaque, char** errptr);
 int uc_storage_exists(uc_storage_t st_opaque, const char* address, size_t address_len, char** errptr);

@@ -34,7 +34,8 @@ for ($i = 0; $i < 3; $i++) {
 	run_test_simple();
 }
 echo 'done';
-
+--XFAIL--
+UCIterator not yet implemented
 --EXPECTF--
 int(50000)
 array(11) {

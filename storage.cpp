@@ -493,19 +493,21 @@ class uc_storage
         return b::none != get_iterator(address, address_len);
     }
 
-    void
+    bool
     get(const char* addr, const size_t addr_len, zval** dst)
     {
         auto it_optional = get_iterator(addr, addr_len);
 
         if (b::none == it_optional) {
             ZVAL_FALSE(*dst);
+            return false;
         }
 
         bump_if_necessary(*it_optional);
 
         auto bound_visitor = std::bind(zval_visitor(), std::placeholders::_1, dst);
         b::apply_visitor(bound_visitor, (*it_optional)->data);
+        return true;
     }
 
     bool
@@ -559,12 +561,13 @@ uc_storage_store(uc_storage_t st_opaque,
     return st->store(address, address_len, data, data_size, expiration, exclusive);
 }
 
-void
+int
 uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    st->get(address, address_len, dst);
+    bool success = st->get(address, address_len, dst);
+    return success;
 }
 
 int

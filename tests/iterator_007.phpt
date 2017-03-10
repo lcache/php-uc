@@ -23,6 +23,8 @@ var_dump(
 	uc_delete($obj)
 );
 ?>
+--XFAIL--
+UCIterator not yet implemented
 --EXPECTF--
 bool(false)
 bool(false)

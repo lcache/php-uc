@@ -345,13 +345,14 @@ int
 uc_cache_fetch(zend_string* key, time_t t, zval** dst)
 {
     char* err;
-    uc_storage_get(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), dst, &err);
+    int success;
+    success = uc_storage_get(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), dst, &err);
     if (err != NULL) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_get: %s", err);
         uc_string_free(err);
         return FAILURE;
     }
-    return 1;
+    return success;
 }
 /* }}} */
 

@@ -28,6 +28,8 @@ var_dump($vals2);
 ?>
 ===DONE===
 <?php exit(0); ?>
+--XFAIL--
+UCIterator not yet implemented
 --EXPECT--
 array(0) {
 }
