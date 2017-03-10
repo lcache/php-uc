@@ -154,8 +154,7 @@ uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_b
 
     // @TODO: As for fetch, relocate this code to the storage layer.
     if (Z_TYPE_P(val) == IS_LONG) {
-        success = uc_storage_store_long(UC_G(storage), ZSTR_VAL(key), Z_LVAL_P(val), ZSTR_LEN(val_s.s), expiration,
-                                        exclusive, &err);
+        success = uc_storage_store_long(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), Z_LVAL_P(val), expiration, exclusive, &err);
         if (err != NULL) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store_long: %s", err);
             uc_string_free(err);
@@ -266,7 +265,8 @@ PHP_FUNCTION(uc_add)
  */
 PHP_FUNCTION(uc_inc)
 {
-    int retval = 0;
+    int retval;
+    char* err;
     zend_string* key;
     zend_long step = 1;
     zval* success  = NULL;
@@ -280,9 +280,8 @@ PHP_FUNCTION(uc_inc)
         zval_ptr_dtor(success);
     }
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_inc(%d)", step);
-    // retval = uc_cache_store(key, NULL, 0, kInc, step, 0);
-    if (0 == retval) {
+    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), step, &err);
+    if (retval) {
         if (success) {
             ZVAL_TRUE(success);
         }

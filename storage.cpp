@@ -174,24 +174,27 @@ class cost_visitor : public boost::static_visitor<size_t>
     }
 };
 
-class increment_visitor : public boost::static_visitor<>
+class increment_visitor : public boost::static_visitor<bool>
 {
   public:
-    void
-    operator()(b::blank& data, long delta) const
+    bool
+    operator()(long& i, long step) const
     {
+        i += step;
+        return true;
     }
 
-    void
-    operator()(long& i, long delta) const
+    template <typename T>
+    bool operator()(const T & operand, long step ) const
     {
-        i += delta;
+        return false;
     }
 
-    void
-    operator()(serialized_t& ser, long delta) const
-    {
-    }
+    //bool
+    //operator()(serialized_t& ser, long step) const
+    //{
+    //    return false;
+    //}
 };
 
 class uc_storage
@@ -418,6 +421,15 @@ class uc_storage
     }
 
     bool
+    increment(lru_cache_by_address_t::iterator& it, long step)
+    {
+        bump_if_necessary(it);
+        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        auto bound_visitor = std::bind(increment_visitor(), std::placeholders::_1, step);
+        return b::apply_visitor(bound_visitor, it->data);
+    }
+
+    bool
     del(const char* addr, const size_t addr_len)
     {
         auto it_optional = get_iterator(addr, addr_len);
@@ -507,6 +519,19 @@ class uc_storage
         entry.expiration = expiration;
         return store(std::move(entry), exclusive);
     }
+
+    bool
+    increment_or_initialize(const char* addr, const size_t addr_len, long step)
+    {
+        auto it_optional = get_iterator(addr, addr_len);
+
+        // If there's no value there, initialize it to the step value.
+        if (b::none == it_optional) {
+            return store(addr, addr_len, step);
+        }
+
+        return increment(*it_optional, step);
+    }
 };
 
 extern "C" {
@@ -531,6 +556,18 @@ uc_storage_size(uc_storage_t st_opaque, char** errptr)
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
     return st->size();
+}
+
+int
+uc_storage_increment(uc_storage_t st_opaque,
+                 const char* address,
+                 size_t address_len,
+                 long step,
+                 char** errptr)
+{
+    uc_storage* st = static_cast<uc_storage*>(st_opaque);
+    *errptr        = NULL;
+    return st->increment_or_initialize(address, address_len, step);
 }
 
 int
@@ -559,7 +596,9 @@ uc_storage_store_long(uc_storage_t st_opaque,
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    return st->store(address, address_len, data, expiration, exclusive);
+    bool success;
+    success = st->store(address, address_len, data, expiration, exclusive);
+    return success;
 }
 
 int
