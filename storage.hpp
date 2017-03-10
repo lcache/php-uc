@@ -36,13 +36,12 @@ int uc_storage_store(uc_storage_t st_opaque,
                      char** errptr);
 
 int uc_storage_store_long(uc_storage_t st_opaque,
-                     const char* address,
-                     size_t address_len,
-                     long data,
-                     time_t expiration,
-                     int exclusive,
-                     char** errptr);
-
+                          const char* address,
+                          size_t address_len,
+                          const long data,
+                          time_t expiration,
+                          int exclusive,
+                          char** errptr);
 void uc_storage_clear(uc_storage_t st_opaque, char** errptr);
 int uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr);
 void uc_string_free(char* strptr);

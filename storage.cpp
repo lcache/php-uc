@@ -42,8 +42,7 @@
 #include <stdio.h>
 #include <time.h>
 
-extern "C"
-{
+extern "C" {
 #include "SAPI.h"
 #include "ext/standard/php_var.h"
 #include "php.h"
@@ -211,7 +210,7 @@ class uc_storage
     size_t
     get_cost(const cache_entry& entry)
     {
-        return b::apply_visitor( cost_visitor(), entry.data );
+        return b::apply_visitor(cost_visitor(), entry.data);
     }
 
     // === Shared Locking ===
@@ -395,66 +394,41 @@ class uc_storage
     }
 
     bool
-    store(const char* addr,
-          const size_t addr_len,
-          const char* val,
-          const size_t val_size,
-          const time_t expiration = 0,
-          bool exclusive = false)
+    store(cache_entry&& e, bool exclusive = false)
     {
-        cache_entry entry(addr, addr_len, m_allocator);
-        serialized_t s(val, val_size, m_allocator);
-        entry.data = std::move(s);
-        entry.expiration = expiration;
-
         bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
 
-        bool success = free_space(lock, get_cost(entry));
+        bool success = free_space(lock, get_cost(e));
         if (!success) {
             return false;
         }
 
         // Attempt to insert. This will fail if the entry already exists.
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
+        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
 
         // std::pair<lru_cache_by_address_t::iterator,bool> res = m_cache->get<entry_address>().emplace(addr, addr_len,
         // val, val_size, expiration, m_allocator);
 
         // Replace on collision, using the matching entry as the position.
         if (!exclusive && !res.second) {
-            res.second = m_cache->get<entry_address>().replace(res.first, std::move(entry));
+            res.second = m_cache->get<entry_address>().replace(res.first, std::move(e));
         }
 
         return res.second;
     }
 
     bool
-    store(const char* addr,
-          const size_t addr_len,
-          const long val,
-          const time_t expiration = 0,
-          bool exclusive = false)
+    del(const char* addr, const size_t addr_len)
     {
-        cache_entry entry(addr, addr_len, m_allocator);
-        entry.data = val;
-        entry.expiration = expiration;
-
-        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-
-        bool success = free_space(lock, get_cost(entry));
-        if (!success) {
+        auto it_optional = get_iterator(addr, addr_len);
+        if (b::none == it_optional) {
             return false;
         }
 
-        // Attempt to insert. This will fail if the entry already exists.
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
-
-        // Replace on collision, using the matching entry as the position.
-        if (!exclusive && !res.second) {
-            res.second = m_cache->get<entry_address>().replace(res.first, std::move(entry));
-        }
-
-        return res.second;
+        // Only grab an exclusive lock if we actually need to erase it.
+        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        m_cache->get<entry_address>().erase(*it_optional);
+        return true;
     }
 
     // === Shared Locking ===
@@ -511,14 +485,27 @@ class uc_storage
     }
 
     bool
-    del(const char* addr, const size_t addr_len)
+    store(const char* addr,
+          const size_t addr_len,
+          const char* val,
+          const size_t val_size,
+          const time_t expiration = 0,
+          bool exclusive          = false)
     {
-        auto it_optional = get_iterator(addr, addr_len);
-        if (b::none == it_optional) {
-            return false;
-        }
-        m_cache->get<entry_address>().erase(*it_optional);
-        return true;
+        cache_entry entry(addr, addr_len, m_allocator);
+        serialized_t s(val, val_size, m_allocator);
+        entry.data       = std::move(s);
+        entry.expiration = expiration;
+        return store(std::move(entry), exclusive);
+    }
+
+    bool
+    store(const char* addr, const size_t addr_len, const long val, const time_t expiration = 0, bool exclusive = false)
+    {
+        cache_entry entry(addr, addr_len, m_allocator);
+        entry.data       = val;
+        entry.expiration = expiration;
+        return store(std::move(entry), exclusive);
     }
 };
 
@@ -562,11 +549,25 @@ uc_storage_store(uc_storage_t st_opaque,
 }
 
 int
+uc_storage_store_long(uc_storage_t st_opaque,
+                      const char* address,
+                      size_t address_len,
+                      const long data,
+                      time_t expiration,
+                      int exclusive,
+                      char** errptr)
+{
+    uc_storage* st = static_cast<uc_storage*>(st_opaque);
+    *errptr        = NULL;
+    return st->store(address, address_len, data, expiration, exclusive);
+}
+
+int
 uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    bool success = st->get(address, address_len, dst);
+    bool success   = st->get(address, address_len, dst);
     return success;
 }
 

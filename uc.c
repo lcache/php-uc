@@ -144,33 +144,39 @@ int
 uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_bool exclusive)
 {
     char* err;
-    int retval;
-    smart_str val_s = { 0 };
+    int success = 0;
+    smart_str val_s   = { 0 };
     time_t expiration = 0;
 
     if (ttl > 0) {
         expiration = time(0) + ttl;
     }
 
-    // @TODO: Implement efficient storage by data type.
-    // if (Z_TYPE_P(val) == IS_LONG) {
-    //} else {
-    php_serialize_data_t var_hash;
-    PHP_VAR_SERIALIZE_INIT(var_hash);
-    php_var_serialize(&val_s, (zval*) val, &var_hash);
-    PHP_VAR_SERIALIZE_DESTROY(var_hash);
-    retval = uc_storage_store(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s),
-                              expiration, exclusive, &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store: %s", err);
-        uc_string_free(err);
+    // @TODO: As for fetch, relocate this code to the storage layer.
+    if (Z_TYPE_P(val) == IS_LONG) {
+        success = uc_storage_store_long(UC_G(storage), ZSTR_VAL(key), Z_LVAL_P(val), ZSTR_LEN(val_s.s), expiration, exclusive, &err);
+        if (err != NULL) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store_long: %s", err);
+            uc_string_free(err);
+            return 0;
+        }
+    } else {
+        php_serialize_data_t var_hash;
+        PHP_VAR_SERIALIZE_INIT(var_hash);
+        php_var_serialize(&val_s, (zval*) val, &var_hash);
+        PHP_VAR_SERIALIZE_DESTROY(var_hash);
+        success = uc_storage_store(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(val_s.s), ZSTR_LEN(val_s.s),
+                                  expiration, exclusive, &err);
+        if (err != NULL) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store: %s", err);
+            uc_string_free(err);
+            smart_str_free(&val_s);
+            return 0;
+        }
         smart_str_free(&val_s);
-        return 0;
     }
-    smart_str_free(&val_s);
-    //}
 
-    return retval;
+    return success;
 }
 /* }}} */
 
