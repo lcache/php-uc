@@ -42,6 +42,7 @@ static zend_function_entry uc_functions[] = {
     PHP_FE(uc_store, arginfo_uc_store)
     PHP_FE(uc_size, arginfo_uc_size)
     PHP_FE(uc_inc, arginfo_uc_inc)
+    PHP_FE(uc_dec, arginfo_uc_inc)
     PHP_FE(uc_cas, arginfo_uc_cas)
     PHP_FE(uc_add, arginfo_uc_store)
     PHP_FE(uc_fetch, arginfo_uc_fetch)
@@ -280,11 +281,49 @@ PHP_FUNCTION(uc_inc)
         zval_ptr_dtor(success);
     }
 
-    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), step, &err);
+    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), &step, &err);
     if (retval) {
         if (success) {
             ZVAL_TRUE(success);
         }
+        RETURN_LONG(step);
+    }
+
+    if (success) {
+        ZVAL_FALSE(success);
+    }
+
+    RETURN_FALSE;
+}
+/* }}} */
+
+/* {{{ proto long apc_dec(string key [, long step [, bool& success]])
+ */
+PHP_FUNCTION(uc_dec)
+{
+    int retval;
+    char* err;
+    zend_string* key;
+    zend_long step = 1;
+    zval* success  = NULL;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
+        return;
+    }
+
+    if (success) {
+        ZVAL_DEREF(success);
+        zval_ptr_dtor(success);
+    }
+
+    step *= -1;
+
+    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), &step, &err);
+    if (retval) {
+        if (success) {
+            ZVAL_TRUE(success);
+        }
+        RETURN_LONG(step);
     }
 
     if (success) {

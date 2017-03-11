@@ -51,6 +51,7 @@ PHP_FUNCTION(uc_store);
 PHP_FUNCTION(uc_fetch);
 PHP_FUNCTION(uc_delete);
 PHP_FUNCTION(uc_inc);
+PHP_FUNCTION(uc_dec);
 PHP_FUNCTION(uc_add);
 PHP_FUNCTION(uc_cas);
 PHP_FUNCTION(uc_size);

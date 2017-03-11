@@ -174,27 +174,45 @@ class cost_visitor : public boost::static_visitor<size_t>
     }
 };
 
-class increment_visitor : public boost::static_visitor<bool>
+class increment_visitor : public boost::static_visitor<b::optional<long> >
 {
   public:
-    bool
-    operator()(long& i, long step) const
+    b::optional<long>
+    operator()(const long& i, long step) const
     {
-        i += step;
-        return true;
+        return i + step;
     }
 
-    template <typename T>
-    bool operator()(const T & operand, long step ) const
-    {
-        return false;
-    }
-
-    //bool
-    //operator()(serialized_t& ser, long step) const
+    //template <typename T>
+    //b::optional<long> operator()(const T & operand, long step ) const
     //{
-    //    return false;
+    //   return b::none;
     //}
+
+    b::optional<long>
+    operator()(const b::blank& b, long step) const
+    {
+        return b::none;
+    }
+
+    b::optional<long>
+    operator()(const serialized_t& ser, long step) const
+    {
+        return b::none;
+    }
+};
+
+struct set_long_value
+{
+  set_long_value(long value):val(value){}
+
+  void operator()(cache_entry& e)
+  {
+    e.data = val;
+  }
+
+private:
+  long val;
 };
 
 class uc_storage
@@ -420,13 +438,30 @@ class uc_storage
         return res.second;
     }
 
-    bool
-    increment(lru_cache_by_address_t::iterator& it, long step)
+    void hello(long& test)
     {
+
+    }
+
+    bool
+    increment(lru_cache_by_address_t::iterator& it, long& step)
+    {
+        auto bound_visitor = std::bind(increment_visitor(), std::placeholders::_1, step);
+        auto new_value_maybe = b::apply_visitor(bound_visitor, it->data);
+
+        // If there is no current long value, we cannot increment.
+        if (b::none == new_value_maybe) {
+            return false;
+        }
+
+        step = *new_value_maybe;
+
+        // Apply the increment.
         bump_if_necessary(it);
         bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-        auto bound_visitor = std::bind(increment_visitor(), std::placeholders::_1, step);
-        return b::apply_visitor(bound_visitor, it->data);
+
+        m_cache->modify(it, set_long_value(step));
+        return true;
     }
 
     bool
@@ -521,7 +556,7 @@ class uc_storage
     }
 
     bool
-    increment_or_initialize(const char* addr, const size_t addr_len, long step)
+    increment_or_initialize(const char* addr, const size_t addr_len, long& step)
     {
         auto it_optional = get_iterator(addr, addr_len);
 
@@ -562,12 +597,12 @@ int
 uc_storage_increment(uc_storage_t st_opaque,
                  const char* address,
                  size_t address_len,
-                 long step,
+                 long* step,
                  char** errptr)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    return st->increment_or_initialize(address, address_len, step);
+    return st->increment_or_initialize(address, address_len, *step);
 }
 
 int
