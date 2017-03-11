@@ -11,6 +11,8 @@ $value = uc_entry("test", function($key){
 	throw new Exception($key);
 });
 ?>
+--XFAIL--
+uc_entry not yet implemented
 --EXPECTF--
 Fatal error: Uncaught Exception: test in %s:3
 Stack trace:

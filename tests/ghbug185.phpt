@@ -49,6 +49,8 @@ var_dump($myapc->add($counterName.'.test', 1));
 var_dump($results = $myapc->getCounters($counterName));
 ?>
 Done
+--XFAIL--
+UCIterator not yet implemented
 --EXPECTF--
 string(%d) "%s"
 NULL

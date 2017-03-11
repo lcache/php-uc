@@ -21,6 +21,8 @@ var_dump($value, uc_entry("test", function($key){
 ?>
 ===DONE===
 <?php exit(0); ?>
+--XFAIL--
+uc_entry not yet implemented
 --EXPECT--
 string(11) "Hello World"
 string(11) "Hello World"

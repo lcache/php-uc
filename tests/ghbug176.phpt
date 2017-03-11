@@ -35,7 +35,8 @@ for ($i = 0; $i < 10; $i++) {
 	run_test_simple();
 }
 echo 'done';
-
+--XFAIL--
+uc.preload_path not yet implemented
 --EXPECT--
 bool(false)
 bool(false)
