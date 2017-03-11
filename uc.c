@@ -271,6 +271,7 @@ PHP_FUNCTION(uc_inc)
     zend_string* key;
     zend_long step = 1;
     zval* success  = NULL;
+    zval* dst;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
         return;
@@ -281,12 +282,12 @@ PHP_FUNCTION(uc_inc)
         zval_ptr_dtor(success);
     }
 
-    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), &step, &err);
+    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), step, &dst, &err);
     if (retval) {
         if (success) {
             ZVAL_TRUE(success);
         }
-        RETURN_LONG(step);
+        RETURN_ZVAL(dst, 0, 0);
     }
 
     if (success) {
@@ -306,6 +307,7 @@ PHP_FUNCTION(uc_dec)
     zend_string* key;
     zend_long step = 1;
     zval* success  = NULL;
+    zval* dst;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
         return;
@@ -316,14 +318,12 @@ PHP_FUNCTION(uc_dec)
         zval_ptr_dtor(success);
     }
 
-    step *= -1;
-
-    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), &step, &err);
+    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), -step, &dst, &err);
     if (retval) {
         if (success) {
             ZVAL_TRUE(success);
         }
-        RETURN_LONG(step);
+        RETURN_ZVAL(dst, 0, 0);
     }
 
     if (success) {
@@ -338,7 +338,8 @@ PHP_FUNCTION(uc_dec)
  */
 PHP_FUNCTION(uc_cas)
 {
-    int retval = 0;
+    int success;
+    char* err;
     zend_string* key;
     zend_long vals[2];
     zval* new_val;
@@ -347,10 +348,14 @@ PHP_FUNCTION(uc_cas)
         return;
     }
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "uc_cas 1");
+    success = uc_storage_cas(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), vals[1], vals[0], &err);
+    if (err != NULL) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store: %s", err);
+        uc_string_free(err);
+        RETURN_FALSE;
+    }
 
-    // retval = uc_cache_store(key, NULL, 0, kCAS, vals[0], vals[1]);
-    if (0 == retval) {
+    if (success) {
         RETURN_TRUE;
     }
 

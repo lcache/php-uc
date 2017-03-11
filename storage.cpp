@@ -71,7 +71,7 @@ typedef bip::basic_string<char, std::char_traits<char>, string_allocator_t> stri
 // A cache entry and its components
 typedef string_t address_t;
 typedef string_t serialized_t;
-typedef b::variant<b::blank, serialized_t, long> value_t;
+typedef b::variant<b::blank, serialized_t, long, double> value_t;
 struct cache_entry {
     address_t address;
     value_t data;
@@ -136,6 +136,12 @@ class zval_visitor : public boost::static_visitor<>
     }
 
     void
+    operator()(const double& l, zval** dst) const
+    {
+        ZVAL_DOUBLE(*dst, l);
+    }
+
+    void
     operator()(const serialized_t& ser, zval** dst) const
     {
         const unsigned char* tmp = (unsigned char*) ser.c_str();
@@ -162,49 +168,71 @@ class cost_visitor : public boost::static_visitor<size_t>
     }
 
     size_t
-    operator()(const long& i) const
-    {
-        return sizeof(long);
-    }
-
-    size_t
     operator()(const serialized_t& ser) const
     {
         return ser.size();
     }
+
+    template <typename T>
+    size_t operator()(const T & operand) const
+    {
+       return sizeof(T);
+    }
 };
 
-class increment_visitor : public boost::static_visitor<b::optional<long> >
+class increment_visitor : public boost::static_visitor<b::optional<value_t> >
 {
   public:
-    b::optional<long>
+    b::optional<value_t>
     operator()(const long& i, long step) const
     {
-        return i + step;
+        zval zstep;
+        zval zcurrent;
+        value_t ret;
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
+
+        ZVAL_LONG(&zcurrent, i);
+        ZVAL_LONG(&zstep, step);
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Adding");
+        fast_long_add_function(&zcurrent, &zcurrent, &zstep);
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting back to variant");
+        if (Z_TYPE(zcurrent) == IS_LONG) {
+            ret = Z_LVAL(zcurrent);
+            return ret;
+        }
+        else if (Z_TYPE(zcurrent) == IS_DOUBLE) {
+            ret = Z_DVAL(zcurrent);
+            return ret;
+        }
+
+        return b::none;
     }
 
     //template <typename T>
-    //b::optional<long> operator()(const T & operand, long step ) const
+    //b::optional<value_t> operator()(const T & operand, long step ) const
     //{
     //   return b::none;
     //}
 
-    b::optional<long>
+    b::optional<value_t>
     operator()(const b::blank& b, long step) const
     {
         return b::none;
     }
 
-    b::optional<long>
+    b::optional<value_t>
     operator()(const serialized_t& ser, long step) const
     {
         return b::none;
     }
 };
 
-struct set_long_value
+struct set_entry_value
 {
-  set_long_value(long value):val(value){}
+  set_entry_value(value_t value):val(value){}
 
   void operator()(cache_entry& e)
   {
@@ -212,7 +240,23 @@ struct set_long_value
   }
 
 private:
-  long val;
+  value_t val;
+};
+
+class cas_match_visitor : public boost::static_visitor<bool>
+{
+  public:
+    bool
+    operator()(const long& i, long expected) const
+    {
+        return (i == expected);
+    }
+
+    template <typename T>
+    bool operator()(const T & operand, long expected ) const
+    {
+       return false;
+    }
 };
 
 class uc_storage
@@ -438,30 +482,25 @@ class uc_storage
         return res.second;
     }
 
-    void hello(long& test)
-    {
-
-    }
-
-    bool
-    increment(lru_cache_by_address_t::iterator& it, long& step)
+    b::optional <value_t>
+    increment(lru_cache_by_address_t::iterator& it, long step)
     {
         auto bound_visitor = std::bind(increment_visitor(), std::placeholders::_1, step);
-        auto new_value_maybe = b::apply_visitor(bound_visitor, it->data);
+        auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
 
-        // If there is no current long value, we cannot increment.
-        if (b::none == new_value_maybe) {
-            return false;
+        // If there is no current, eligible value, we cannot increment.
+        if (b::none == next_value_maybe) {
+            return b::none;
         }
 
-        step = *new_value_maybe;
+        value_t next_value = *next_value_maybe;
 
         // Apply the increment.
         bump_if_necessary(it);
         bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
 
-        m_cache->modify(it, set_long_value(step));
-        return true;
+        m_cache->modify(it, set_entry_value(next_value));
+        return next_value;
     }
 
     bool
@@ -556,16 +595,48 @@ class uc_storage
     }
 
     bool
-    increment_or_initialize(const char* addr, const size_t addr_len, long& step)
+    increment_or_initialize(const char* addr, const size_t addr_len, long step, zval** dst)
+    {
+        auto it_optional = get_iterator(addr, addr_len);
+        b::optional<value_t> next_value;
+
+        // If there's no value yet, initialize it to the step value.
+        if (b::none == it_optional) {
+            next_value = step;
+            if (!store(addr, addr_len, step)) {
+                return false;
+            }
+        } else {
+            next_value = increment(*it_optional, step);
+            if (b::none == next_value) {
+                return false;
+            }
+        }
+
+        // Convert to a zval
+        auto bound_visitor = std::bind(zval_visitor(), std::placeholders::_1, dst);
+        b::apply_visitor(bound_visitor, *next_value);
+        return true;
+    }
+
+    bool
+    cas(const char* addr, const size_t addr_len, long next, long expected)
     {
         auto it_optional = get_iterator(addr, addr_len);
 
-        // If there's no value there, initialize it to the step value.
+        // If there's no value there, succeed without comparison.
         if (b::none == it_optional) {
-            return store(addr, addr_len, step);
+            return store(addr, addr_len, next);
         }
 
-        return increment(*it_optional, step);
+        // If the value doesn't match what's expected (or is the wrong type), fail.
+        auto bound_visitor = std::bind(cas_match_visitor(), std::placeholders::_1, expected);
+        if (!b::apply_visitor(bound_visitor, (*it_optional)->data)) {
+            return false;
+        }
+
+        // Store the new value.
+        return store(addr, addr_len, next);
     }
 };
 
@@ -597,12 +668,25 @@ int
 uc_storage_increment(uc_storage_t st_opaque,
                  const char* address,
                  size_t address_len,
-                 long* step,
+                 long step,
+                 zval** dst,
                  char** errptr)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    return st->increment_or_initialize(address, address_len, *step);
+    return st->increment_or_initialize(address, address_len, step, dst);
+}
+
+int uc_storage_cas(uc_storage_t st_opaque,
+                 const char* address,
+                 size_t address_len,
+                 long next,
+                 long expected,
+                 char** errptr)
+{
+    uc_storage* st = static_cast<uc_storage*>(st_opaque);
+    *errptr        = NULL;
+    return st->cas(address, address_len, next, expected);
 }
 
 int
