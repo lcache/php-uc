@@ -14,3 +14,10 @@ A PHP extension providing an APCu-compatible API built on Boost Interprocess.
         make
         make test
         sudo make install
+
+## Testing
+
+After running `./configure`, you can run tests:
+
+* Basic: `make test`
+* With Valgrind: `make test TESTS="-m"`
