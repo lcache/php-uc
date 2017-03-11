@@ -43,19 +43,11 @@ int uc_storage_store_long(uc_storage_t st_opaque,
                           int exclusive,
                           char** errptr);
 
-int uc_storage_increment(uc_storage_t st_opaque,
-                 const char* address,
-                 size_t address_len,
-                 long step,
-                 zval** dst,
-                 char** errptr);
+int uc_storage_increment(
+  uc_storage_t st_opaque, const char* address, size_t address_len, long step, zval** dst, char** errptr);
 
-int uc_storage_cas(uc_storage_t st_opaque,
-                 const char* address,
-                 size_t address_len,
-                 long next,
-                 long expected,
-                 char** errptr);
+int uc_storage_cas(
+  uc_storage_t st_opaque, const char* address, size_t address_len, long next, long expected, char** errptr);
 
 void uc_storage_clear(uc_storage_t st_opaque, char** errptr);
 int uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr);

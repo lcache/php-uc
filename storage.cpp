@@ -174,13 +174,14 @@ class cost_visitor : public boost::static_visitor<size_t>
     }
 
     template <typename T>
-    size_t operator()(const T & operand) const
+    size_t
+    operator()(const T& operand) const
     {
-       return sizeof(T);
+        return sizeof(T);
     }
 };
 
-class increment_visitor : public boost::static_visitor<b::optional<value_t> >
+class increment_visitor : public boost::static_visitor<b::optional<value_t>>
 {
   public:
     b::optional<value_t>
@@ -190,20 +191,19 @@ class increment_visitor : public boost::static_visitor<b::optional<value_t> >
         zval zcurrent;
         value_t ret;
 
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
+        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
 
         ZVAL_LONG(&zcurrent, i);
         ZVAL_LONG(&zstep, step);
 
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Adding");
+        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Adding");
         fast_long_add_function(&zcurrent, &zcurrent, &zstep);
 
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting back to variant");
+        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting back to variant");
         if (Z_TYPE(zcurrent) == IS_LONG) {
             ret = Z_LVAL(zcurrent);
             return ret;
-        }
-        else if (Z_TYPE(zcurrent) == IS_DOUBLE) {
+        } else if (Z_TYPE(zcurrent) == IS_DOUBLE) {
             ret = Z_DVAL(zcurrent);
             return ret;
         }
@@ -211,8 +211,8 @@ class increment_visitor : public boost::static_visitor<b::optional<value_t> >
         return b::none;
     }
 
-    //template <typename T>
-    //b::optional<value_t> operator()(const T & operand, long step ) const
+    // template <typename T>
+    // b::optional<value_t> operator()(const T & operand, long step ) const
     //{
     //   return b::none;
     //}
@@ -230,17 +230,20 @@ class increment_visitor : public boost::static_visitor<b::optional<value_t> >
     }
 };
 
-struct set_entry_value
-{
-  set_entry_value(value_t value):val(value){}
+struct set_entry_value {
+    set_entry_value(value_t value)
+        : val(value)
+    {
+    }
 
-  void operator()(cache_entry& e)
-  {
-    e.data = val;
-  }
+    void
+    operator()(cache_entry& e)
+    {
+        e.data = val;
+    }
 
-private:
-  value_t val;
+  private:
+    value_t val;
 };
 
 class cas_match_visitor : public boost::static_visitor<bool>
@@ -253,9 +256,10 @@ class cas_match_visitor : public boost::static_visitor<bool>
     }
 
     template <typename T>
-    bool operator()(const T & operand, long expected ) const
+    bool
+    operator()(const T& operand, long expected) const
     {
-       return false;
+        return false;
     }
 };
 
@@ -482,10 +486,10 @@ class uc_storage
         return res.second;
     }
 
-    b::optional <value_t>
+    b::optional<value_t>
     increment(lru_cache_by_address_t::iterator& it, long step)
     {
-        auto bound_visitor = std::bind(increment_visitor(), std::placeholders::_1, step);
+        auto bound_visitor    = std::bind(increment_visitor(), std::placeholders::_1, step);
         auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
 
         // If there is no current, eligible value, we cannot increment.
@@ -665,24 +669,16 @@ uc_storage_size(uc_storage_t st_opaque, char** errptr)
 }
 
 int
-uc_storage_increment(uc_storage_t st_opaque,
-                 const char* address,
-                 size_t address_len,
-                 long step,
-                 zval** dst,
-                 char** errptr)
+uc_storage_increment(
+  uc_storage_t st_opaque, const char* address, size_t address_len, long step, zval** dst, char** errptr)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
     return st->increment_or_initialize(address, address_len, step, dst);
 }
 
-int uc_storage_cas(uc_storage_t st_opaque,
-                 const char* address,
-                 size_t address_len,
-                 long next,
-                 long expected,
-                 char** errptr)
+int
+uc_storage_cas(uc_storage_t st_opaque, const char* address, size_t address_len, long next, long expected, char** errptr)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
