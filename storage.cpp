@@ -124,35 +124,35 @@ class zval_visitor : public boost::static_visitor<>
 {
   public:
     void
-    operator()(const b::blank& data, zval** dst) const
+    operator()(const b::blank& data, zval* dst) const
     {
-        ZVAL_NULL(*dst);
+        ZVAL_NULL(dst);
     }
 
     void
-    operator()(const long& l, zval** dst) const
+    operator()(const long& l, zval* dst) const
     {
-        ZVAL_LONG(*dst, l);
+        ZVAL_LONG(dst, l);
     }
 
     void
-    operator()(const double& l, zval** dst) const
+    operator()(const double& l, zval* dst) const
     {
-        ZVAL_DOUBLE(*dst, l);
+        ZVAL_DOUBLE(dst, l);
     }
 
     void
-    operator()(const serialized_t& ser, zval** dst) const
+    operator()(const serialized_t& ser, zval* dst) const
     {
         const unsigned char* tmp = (unsigned char*) ser.c_str();
         php_unserialize_data_t var_hash;
         PHP_VAR_UNSERIALIZE_INIT(var_hash);
-        if (!php_var_unserialize(*dst, &tmp, (unsigned char*) ser.c_str() + ser.size(), &var_hash)) {
+        if (!php_var_unserialize(dst, &tmp, (unsigned char*) ser.c_str() + ser.size(), &var_hash)) {
             PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
             // @TODO: Convert to exception or err string?
             php_error_docref(NULL, E_WARNING, "Error unserializing at offset %ld of %ld bytes",
                              (zend_long)(tmp - (unsigned char*) ser.c_str()), (zend_long) ser.size());
-            ZVAL_FALSE(*dst);
+            ZVAL_FALSE(dst);
         }
         PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
     }
@@ -558,12 +558,12 @@ class uc_storage
     }
 
     bool
-    get(const char* addr, const size_t addr_len, zval** dst)
+    get(const char* addr, const size_t addr_len, zval* dst)
     {
         auto it_optional = get_iterator(addr, addr_len);
 
         if (b::none == it_optional) {
-            ZVAL_FALSE(*dst);
+            ZVAL_FALSE(dst);
             return false;
         }
 
@@ -599,7 +599,7 @@ class uc_storage
     }
 
     bool
-    increment_or_initialize(const char* addr, const size_t addr_len, long step, zval** dst)
+    increment_or_initialize(const char* addr, const size_t addr_len, long step, zval* dst)
     {
         auto it_optional = get_iterator(addr, addr_len);
         b::optional<value_t> next_value;
@@ -674,7 +674,7 @@ uc_storage_increment(
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    return st->increment_or_initialize(address, address_len, step, dst);
+    return st->increment_or_initialize(address, address_len, step, *dst);
 }
 
 int
@@ -721,7 +721,7 @@ uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, 
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     *errptr        = NULL;
-    bool success   = st->get(address, address_len, dst);
+    bool success   = st->get(address, address_len, *dst);
     return success;
 }
 
