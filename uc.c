@@ -37,7 +37,6 @@ ZEND_DECLARE_MODULE_GLOBALS(uc)
 
 static zend_function_entry uc_functions[] = {
     // clang-format off
-    PHP_FE(uc_test, NULL)
     PHP_FE(uc_clear_cache, arginfo_uc_clear_cache)
     PHP_FE(uc_store, arginfo_uc_store)
     PHP_FE(uc_size, arginfo_uc_size)
@@ -101,14 +100,9 @@ PHP_MINIT_FUNCTION(uc)
 PHP_MSHUTDOWN_FUNCTION(uc)
 {
     UNREGISTER_INI_ENTRIES();
-
     return SUCCESS;
 }
 
-PHP_FUNCTION(uc_test)
-{
-    RETURN_STRING("UC Test");
-}
 /* {{{ proto void uc_clear_cache() */
 PHP_FUNCTION(uc_clear_cache)
 {
