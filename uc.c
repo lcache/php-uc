@@ -364,7 +364,7 @@ PHP_FUNCTION(uc_fetch)
             if (success && ret.success) {
                 ZVAL_TRUE(success);
             }
-            RETURN_ZVAL(&(ret.val), 1, 1);
+            RETURN_ZVAL(&(ret.val), 0, 1);
         } else if (Z_TYPE_P(key) == IS_ARRAY) {
             HashPosition hpos;
             zval* hentry;

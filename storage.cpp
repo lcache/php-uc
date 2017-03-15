@@ -202,13 +202,13 @@ class increment_visitor : public boost::static_visitor<b::optional<value_t>>
 {
   public:
     b::optional<value_t>
-    operator()(const long& i, long step) const
+    operator()(const long& i, const long step) const
     {
         zval zstep;
         zval zcurrent;
         value_t ret;
 
-        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
 
         ZVAL_LONG(&zcurrent, i);
         ZVAL_LONG(&zstep, step);
@@ -235,13 +235,13 @@ class increment_visitor : public boost::static_visitor<b::optional<value_t>>
     //}
 
     b::optional<value_t>
-    operator()(const b::blank& b, long step) const
+    operator()(const b::blank& b, const long step) const
     {
         return b::none;
     }
 
     b::optional<value_t>
-    operator()(const serialized_t& ser, long step) const
+    operator()(const serialized_t& ser, const long step) const
     {
         return b::none;
     }
@@ -502,6 +502,8 @@ class uc_storage
             return b::none;
         }
 
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to get next value");
+
         value_t next_value = *next_value_maybe;
 
         // Apply the increment.
@@ -630,27 +632,32 @@ class uc_storage
     zval_and_success
     increment_or_initialize(const zend_string& addr, const long step)
     {
+        // @TODO: Add proper locking here.
+
         zval_and_success ret;
         auto it_optional = get_iterator(addr);
         b::optional<value_t> next_value;
 
+        ret.success = false;
+
         // If there's no value yet, initialize it to the step value.
         if (b::none == it_optional) {
             next_value = step;
-            if (!store(addr, step)) {
+            if (store(addr, step)) {
+                ZVAL_LONG(&ret.val, step);
                 ret.success = true;
             }
         } else {
             next_value = increment(*it_optional, step);
             if (b::none == next_value) {
                 ZVAL_NULL(&(ret.val));
-                ret.success = false;
+            } else {
+                // Convert to a zval
+                ret.val = b::apply_visitor(zval_visitor(), *next_value);
+                ret.success = true;
             }
         }
 
-        // Convert to a zval
-        ret.val = b::apply_visitor(zval_visitor(), *next_value);
-        ret.success = true;
         return ret;
     }
 
