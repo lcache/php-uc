@@ -313,16 +313,6 @@ PHP_FUNCTION(uc_dump)
 }
 /* }}} */
 
-/* {{{ uc_cache_fetch */
-zval_and_success
-uc_cache_fetch(const zend_string* key, const time_t t)
-{
-    zval_and_success ret;
-    ret = uc_storage_get(UC_G(storage), key);
-    return ret;
-}
-/* }}} */
-
 /* {{{ proto mixed uc_fetch(mixed key[, bool &success])
  */
 PHP_FUNCTION(uc_fetch)
@@ -354,7 +344,7 @@ PHP_FUNCTION(uc_fetch)
 
     if (Z_TYPE_P(key) == IS_ARRAY || (Z_TYPE_P(key) == IS_STRING && Z_STRLEN_P(key) > 0)) {
         if (Z_TYPE_P(key) == IS_STRING) {
-            ret = uc_cache_fetch(Z_STR_P(key), t);
+            ret = uc_storage_get(UC_G(storage), Z_STR_P(key), t);
             if (success && ret.success) {
                 ZVAL_TRUE(success);
             }
@@ -368,7 +358,7 @@ PHP_FUNCTION(uc_fetch)
             zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
             while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
                 if (Z_TYPE_P(hentry) == IS_STRING) {
-                    zval_and_success result_entry = uc_cache_fetch(Z_STR_P(hentry), t);
+                    zval_and_success result_entry = uc_storage_get(UC_G(storage), Z_STR_P(hentry), t);
                     if (result_entry.success) {
                         add_assoc_zval(&retarray, Z_STRVAL_P(hentry), &(result_entry.val));
                     }
@@ -391,14 +381,6 @@ PHP_FUNCTION(uc_fetch)
 }
 /* }}} */
 
-/* {{{ uc_cache_delete */
-zend_bool
-uc_cache_delete(const zend_string* key)
-{
-    return uc_storage_delete(UC_G(storage), key);
-}
-/* }}} */
-
 /* {{{ proto mixed uc_delete(mixed keys)
  */
 PHP_FUNCTION(uc_delete)
@@ -418,7 +400,7 @@ PHP_FUNCTION(uc_delete)
             RETURN_FALSE;
         }
 
-        if (uc_cache_delete(Z_STR_P(keys))) {
+        if (uc_storage_delete(UC_G(storage), Z_STR_P(keys))) {
             RETURN_TRUE;
         } else {
             RETURN_FALSE;
@@ -437,7 +419,7 @@ PHP_FUNCTION(uc_delete)
                                  "uc_delete() expects a string, array of strings, or UCIterator instance.");
                 add_next_index_zval(return_value, hentry);
                 Z_ADDREF_P(hentry);
-            } else if (uc_cache_delete(Z_STR_P(hentry)) != 1) {
+            } else if (uc_storage_delete(UC_G(storage), Z_STR_P(hentry)) != 1) {
                 add_next_index_zval(return_value, hentry);
                 Z_ADDREF_P(hentry);
             }

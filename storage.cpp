@@ -725,7 +725,7 @@ uc_storage_store(
 }
 
 zval_and_success
-uc_storage_get(uc_storage_t st_opaque, const zend_string* address)
+uc_storage_get(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->get(*address);
