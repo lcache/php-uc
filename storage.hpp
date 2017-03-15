@@ -25,37 +25,28 @@ extern "C" {
 
 typedef void* uc_storage_t;
 
-uc_storage_t uc_storage_init(size_t size, char** errptr);
-int uc_storage_store(uc_storage_t st_opaque,
-                     const char* address,
-                     size_t address_len,
-                     const char* data,
-                     size_t data_size,
-                     time_t expiration,
-                     int exclusive,
-                     char** errptr);
+typedef zend_bool success_t;
 
-int uc_storage_store_long(uc_storage_t st_opaque,
-                          const char* address,
-                          size_t address_len,
-                          const long data,
-                          time_t expiration,
-                          int exclusive,
-                          char** errptr);
+typedef struct {
+    zval val;
+    success_t success;
+} zval_and_success;
 
-int uc_storage_increment(
-  uc_storage_t st_opaque, const char* address, size_t address_len, long step, zval** dst, char** errptr);
+uc_storage_t uc_storage_init(const size_t size);
+success_t uc_storage_store(uc_storage_t st_opaque,
+                     const zend_string* address,
+                     const zval* data,
+                     const time_t expiration,
+                     const zend_bool exclusive);
 
-int uc_storage_cas(
-  uc_storage_t st_opaque, const char* address, size_t address_len, long next, long expected, char** errptr);
-
-void uc_storage_clear(uc_storage_t st_opaque, char** errptr);
-int uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr);
-void uc_string_free(char* strptr);
-size_t uc_storage_size(uc_storage_t st_opaque, char** errptr);
-int uc_storage_exists(uc_storage_t st_opaque, const char* address, size_t address_len, char** errptr);
-void uc_storage_dump(uc_storage_t st_opaque, char** errptr);
-int uc_storage_delete(uc_storage_t st_opaque, const char* address, size_t address_len, char** errptr);
+zval_and_success uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step);
+success_t uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected);
+void uc_storage_clear(uc_storage_t st_opaque);
+zval_and_success uc_storage_get(uc_storage_t st_opaque, const zend_string* address);
+size_t uc_storage_size(uc_storage_t st_opaque);
+success_t uc_storage_exists(uc_storage_t st_opaque, const zend_string* address);
+void uc_storage_dump(uc_storage_t st_opaque);
+success_t uc_storage_delete(uc_storage_t st_opaque, const zend_string* address);
 
 #ifdef __cplusplus
 }

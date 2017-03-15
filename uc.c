@@ -84,12 +84,9 @@ PHP_MINIT_FUNCTION(uc)
     REGISTER_INI_ENTRIES();
 
     int retval;
-    char* err;
 
-    UC_G(storage) = uc_storage_init(UC_G(size_in_mb) * 1024 * 1024, &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_init: %s", err);
-        uc_string_free(err);
+    UC_G(storage) = uc_storage_init(UC_G(size_in_mb) * 1024 * 1024);
+    if (NULL == UC_G(storage)) {
         return FAILURE;
     }
 
@@ -118,16 +115,7 @@ PHP_FUNCTION(uc_clear_cache)
     if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
-
-    char* err = NULL;
-
-    uc_storage_clear(UC_G(storage), &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_clear: %s", err);
-        uc_string_free(err);
-        RETURN_FALSE;
-    }
-
+    uc_storage_clear(UC_G(storage));
     RETURN_TRUE;
 }
 /* }}} */
@@ -142,7 +130,7 @@ uc_time()
 
 /* {{{ uc_cache_store */
 int
-uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_bool exclusive)
+uc_cache_store(const zend_string* key, const zval* val, const size_t ttl, const zend_bool exclusive)
 {
     char* err;
     int success       = 0;
@@ -152,45 +140,7 @@ uc_cache_store(zend_string* key, const zval* val, const size_t ttl, const zend_b
         expiration = time(0) + ttl;
     }
 
-    // @TODO: As for fetch, relocate this code to the storage layer.
-    if (Z_TYPE_P(val) == IS_LONG) {
-        success = uc_storage_store_long(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), Z_LVAL_P(val), expiration,
-                                        exclusive, &err);
-        if (err != NULL) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store_long: %s", err);
-            uc_string_free(err);
-            return 0;
-        }
-    } else {
-        smart_str strbuf = { 0 };
-        php_serialize_data_t var_hash;
-        PHP_VAR_SERIALIZE_INIT(var_hash);
-        php_var_serialize(&strbuf, (zval*) val, &var_hash);
-        PHP_VAR_SERIALIZE_DESTROY(var_hash);
-
-        // A null string from serialization indicates that serialization failed.
-        if (strbuf.s == NULL) {
-            return 0;
-        }
-
-        // An exception indicates a serialization failure.
-        if (EG(exception)) {
-            smart_str_free(&strbuf);
-            return 0;
-        }
-
-        success = uc_storage_store(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), ZSTR_VAL(strbuf.s), ZSTR_LEN(strbuf.s),
-                                   expiration, exclusive, &err);
-        if (err != NULL) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store: %s", err);
-            uc_string_free(err);
-            smart_str_free(&strbuf);
-            return 0;
-        }
-        smart_str_free(&strbuf);
-    }
-
-    return success;
+    return uc_storage_store(UC_G(storage), key, val, expiration, exclusive);
 }
 /* }}} */
 
@@ -213,44 +163,41 @@ uc_store_helper(INTERNAL_FUNCTION_PARAMETERS, const zend_bool exclusive)
         RETURN_FALSE;
     }
 
-    /* keep it tidy */
-    {
-        if (Z_TYPE_P(key) == IS_ARRAY) {
-            zval* hentry;
-            zend_string* hkey;
-            zend_ulong hkey_idx;
+    if (Z_TYPE_P(key) == IS_ARRAY) {
+        zval* hentry;
+        zend_string* hkey;
+        zend_ulong hkey_idx;
 
-            HashPosition hpos;
-            HashTable* hash = Z_ARRVAL_P(key);
+        HashPosition hpos;
+        HashTable* hash = Z_ARRVAL_P(key);
 
-            /* note: only indicative of error */
-            array_init(return_value);
-            zend_hash_internal_pointer_reset_ex(hash, &hpos);
-            while ((hentry = zend_hash_get_current_data_ex(hash, &hpos))) {
-                if (zend_hash_get_current_key_ex(hash, &hkey, &hkey_idx, &hpos) == HASH_KEY_IS_STRING) {
-                    if (!uc_cache_store(hkey, hentry, (uint32_t) ttl, exclusive)) {
-                        add_assoc_long_ex(return_value, hkey->val, hkey->len, -1); /* -1: insertion error */
-                    }
-                } else {
-                    add_index_long(return_value, hkey_idx, -1); /* -1: insertion error */
-                }
-                zend_hash_move_forward_ex(hash, &hpos);
-            }
-            return;
-        } else {
-            if (Z_TYPE_P(key) == IS_STRING) {
-                if (!val) {
-                    /* nothing to store */
-                    RETURN_FALSE;
-                }
-                /* return true on success */
-                if (uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, exclusive)) {
-                    RETURN_TRUE;
+        /* note: only indicative of error */
+        array_init(return_value);
+        zend_hash_internal_pointer_reset_ex(hash, &hpos);
+        while ((hentry = zend_hash_get_current_data_ex(hash, &hpos))) {
+            if (zend_hash_get_current_key_ex(hash, &hkey, &hkey_idx, &hpos) == HASH_KEY_IS_STRING) {
+                if (!uc_cache_store(hkey, hentry, (uint32_t) ttl, exclusive)) {
+                    add_assoc_long_ex(return_value, hkey->val, hkey->len, -1); /* -1: insertion error */
                 }
             } else {
-                php_error_docref(NULL TSRMLS_CC, E_WARNING,
-                                 "uc_store() expects key parameter to be a string or an array of key/value pairs.");
+                add_index_long(return_value, hkey_idx, -1); /* -1: insertion error */
             }
+            zend_hash_move_forward_ex(hash, &hpos);
+        }
+        return;
+    } else {
+        if (Z_TYPE_P(key) == IS_STRING) {
+            if (!val) {
+                /* nothing to store */
+                RETURN_FALSE;
+            }
+            /* return true on success */
+            if (uc_cache_store(Z_STR_P(key), val, (uint32_t) ttl, exclusive)) {
+                RETURN_TRUE;
+            }
+        } else {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING,
+                             "uc_store() expects key parameter to be a string or an array of key/value pairs.");
         }
     }
 
@@ -279,12 +226,10 @@ PHP_FUNCTION(uc_add)
  */
 PHP_FUNCTION(uc_inc)
 {
-    int retval;
-    char* err;
     zend_string* key;
     zend_long step = 1;
     zval* success  = NULL;
-    zval* dst;
+    zval_and_success ret;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
         return;
@@ -293,21 +238,16 @@ PHP_FUNCTION(uc_inc)
     if (success) {
         ZVAL_DEREF(success);
         zval_ptr_dtor(success);
-    }
-
-    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), step, &dst, &err);
-    if (retval) {
-        if (success) {
-            ZVAL_TRUE(success);
-        }
-        RETURN_ZVAL(dst, 0, 0);
-    }
-
-    if (success) {
         ZVAL_FALSE(success);
     }
 
-    RETURN_FALSE;
+    ret = uc_storage_increment(UC_G(storage), key, step);
+
+    if (success && ret.success) {
+        ZVAL_TRUE(success);
+    }
+
+    RETURN_ZVAL(&ret.val, 1, 1);
 }
 /* }}} */
 
@@ -315,12 +255,10 @@ PHP_FUNCTION(uc_inc)
  */
 PHP_FUNCTION(uc_dec)
 {
-    int retval;
-    char* err;
     zend_string* key;
     zend_long step = 1;
     zval* success  = NULL;
-    zval* dst;
+    zval_and_success ret;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
         return;
@@ -329,21 +267,16 @@ PHP_FUNCTION(uc_dec)
     if (success) {
         ZVAL_DEREF(success);
         zval_ptr_dtor(success);
-    }
-
-    retval = uc_storage_increment(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), -step, &dst, &err);
-    if (retval) {
-        if (success) {
-            ZVAL_TRUE(success);
-        }
-        RETURN_ZVAL(dst, 0, 0);
-    }
-
-    if (success) {
         ZVAL_FALSE(success);
     }
 
-    RETURN_FALSE;
+    ret = uc_storage_increment(UC_G(storage), key, -step);
+
+    if (success && ret.success) {
+        ZVAL_TRUE(success);
+    }
+
+    RETURN_ZVAL(&ret.val, 1, 1);
 }
 /* }}} */
 
@@ -351,22 +284,17 @@ PHP_FUNCTION(uc_dec)
  */
 PHP_FUNCTION(uc_cas)
 {
-    int success;
     char* err;
     zend_string* key;
     zend_long vals[2];
     zval* new_val;
+    zend_bool success;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sll", &key, &vals[0], &vals[1]) == FAILURE) {
         return;
     }
 
-    success = uc_storage_cas(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), vals[1], vals[0], &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_store: %s", err);
-        uc_string_free(err);
-        RETURN_FALSE;
-    }
+    success = uc_storage_cas(UC_G(storage), key, vals[1], vals[0]);
 
     if (success) {
         RETURN_TRUE;
@@ -379,13 +307,7 @@ PHP_FUNCTION(uc_cas)
 /* {{{ uc_cache_size */
 PHP_FUNCTION(uc_size)
 {
-    char* err;
-    size_t size = uc_storage_size(UC_G(storage), &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_size: %s", err);
-        uc_string_free(err);
-        size = 0;
-    }
+    size_t size = uc_storage_size(UC_G(storage));
     RETURN_LONG(size);
 }
 /* }}} */
@@ -393,29 +315,17 @@ PHP_FUNCTION(uc_size)
 /* {{{ uc_dump */
 PHP_FUNCTION(uc_dump)
 {
-    char* err;
-    uc_storage_dump(UC_G(storage), &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_dump: %s", err);
-        uc_string_free(err);
-        return;
-    }
+    uc_storage_dump(UC_G(storage));
 }
 /* }}} */
 
 /* {{{ uc_cache_fetch */
-int
-uc_cache_fetch(zend_string* key, time_t t, zval** dst)
+zval_and_success
+uc_cache_fetch(const zend_string* key, const time_t t)
 {
-    char* err;
-    int success;
-    success = uc_storage_get(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), dst, &err);
-    if (err != NULL) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_get: %s", err);
-        uc_string_free(err);
-        return FAILURE;
-    }
-    return success;
+    zval_and_success ret;
+    ret = uc_storage_get(UC_G(storage), key);
+    return ret;
 }
 /* }}} */
 
@@ -426,6 +336,7 @@ PHP_FUNCTION(uc_fetch)
     zval* key;
     zval* success = NULL;
     time_t t;
+    zval_and_success ret;
 
     if (!UC_G(enabled)) {
         RETURN_FALSE;
@@ -449,27 +360,23 @@ PHP_FUNCTION(uc_fetch)
 
     if (Z_TYPE_P(key) == IS_ARRAY || (Z_TYPE_P(key) == IS_STRING && Z_STRLEN_P(key) > 0)) {
         if (Z_TYPE_P(key) == IS_STRING) {
-            if (uc_cache_fetch(Z_STR_P(key), t, &return_value)) {
-                if (success) {
-                    ZVAL_TRUE(success);
-                }
-            } else {
-                ZVAL_BOOL(return_value, 0);
+            ret = uc_cache_fetch(Z_STR_P(key), t);
+            if (success && ret.success) {
+                ZVAL_TRUE(success);
             }
+            RETURN_ZVAL(&(ret.val), 1, 1);
         } else if (Z_TYPE_P(key) == IS_ARRAY) {
             HashPosition hpos;
             zval* hentry;
-            zval result;
+            zval retarray;
 
-            array_init(&result);
+            array_init(&retarray);
             zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
             while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
                 if (Z_TYPE_P(hentry) == IS_STRING) {
-                    zval result_entry, *iresult = &result_entry;
-                    ZVAL_UNDEF(iresult);
-
-                    if (uc_cache_fetch(Z_STR_P(hentry), t, &iresult)) {
-                        add_assoc_zval(&result, Z_STRVAL_P(hentry), &result_entry);
+                    zval_and_success result_entry = uc_cache_fetch(Z_STR_P(hentry), t);
+                    if (result_entry.success) {
+                        add_assoc_zval(&retarray, Z_STRVAL_P(hentry), &(result_entry.val));
                     }
                 } else {
                     php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch() expects a string or array of strings.");
@@ -478,32 +385,23 @@ PHP_FUNCTION(uc_fetch)
                 zend_hash_move_forward_ex(Z_ARRVAL_P(key), &hpos);
             }
 
-            RETVAL_ZVAL(&result, 0, 1);
-
             if (success) {
                 ZVAL_TRUE(success);
             }
+            RETURN_ZVAL(&retarray, 0, 1);
         }
-    } else {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch() expects a string or array of strings.");
-        RETURN_FALSE;
     }
-    return;
+
+    php_error_docref(NULL TSRMLS_CC, E_WARNING, "uc_fetch() expects a string or array of strings.");
+    RETURN_FALSE;
 }
 /* }}} */
 
 /* {{{ uc_cache_delete */
 zend_bool
-uc_cache_delete(zend_string* key)
+uc_cache_delete(const zend_string* key)
 {
-    char* err;
-    int retval = uc_storage_delete(UC_G(storage), ZSTR_VAL(key), ZSTR_LEN(key), &err);
-    if (NULL != err) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_delete: %s", err);
-        uc_string_free(err);
-        return 0;
-    }
-    return retval;
+    return uc_storage_delete(UC_G(storage), key);
 }
 /* }}} */
 
@@ -569,8 +467,7 @@ PHP_FUNCTION(uc_delete)
  */
 PHP_FUNCTION(uc_exists)
 {
-    char* err;
-    int retval;
+    zend_bool found;
     zval* key;
     time_t t;
 
@@ -591,13 +488,8 @@ PHP_FUNCTION(uc_exists)
 
     if (Z_TYPE_P(key) == IS_STRING) {
         if (Z_STRLEN_P(key)) {
-            retval = uc_storage_exists(UC_G(storage), ZSTR_VAL(Z_STR_P(key)), ZSTR_LEN(Z_STR_P(key)), &err);
-            if (err != NULL) {
-                php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_exists: %s", err);
-                uc_string_free(err);
-                retval = 0;
-            }
-            if (retval) {
+            found = uc_storage_exists(UC_G(storage), Z_STR_P(key));
+            if (found) {
                 RETURN_TRUE;
             } else {
                 RETURN_FALSE;
@@ -612,13 +504,8 @@ PHP_FUNCTION(uc_exists)
         zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
         while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
             if (Z_TYPE_P(hentry) == IS_STRING) {
-                retval = uc_storage_exists(UC_G(storage), ZSTR_VAL(Z_STR_P(hentry)), ZSTR_LEN(Z_STR_P(hentry)), &err);
-                if (err != NULL) {
-                    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Failed uc_storage_exists: %s", err);
-                    uc_string_free(err);
-                    retval = 0;
-                }
-                if (retval) {
+                found = uc_storage_exists(UC_G(storage), Z_STR_P(hentry));
+                if (found) {
                     add_assoc_bool(return_value, Z_STRVAL_P(hentry), 1);
                 }
             } else {

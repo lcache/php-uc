@@ -68,9 +68,18 @@ typedef bip::allocator<void, segment_manager_t> void_allocator_t;
 typedef bip::allocator<char, segment_manager_t> string_allocator_t;
 typedef bip::basic_string<char, std::char_traits<char>, string_allocator_t> string_t;
 
+class zstring_t : public string_t
+{
+public:
+    zstring_t(const zend_string& data, const allocator_type& a)
+    : string_t(ZSTR_VAL(&data), ZSTR_LEN(&data), a)
+    {
+    }
+};
+
 // A cache entry and its components
-typedef string_t address_t;
-typedef string_t serialized_t;
+typedef zstring_t address_t;
+typedef zstring_t serialized_t;
 typedef b::variant<b::blank, serialized_t, long, double> value_t;
 struct cache_entry {
     address_t address;
@@ -79,8 +88,8 @@ struct cache_entry {
     time_t expiration = 0;
     time_t last_used  = 0;
 
-    cache_entry(const char* address_, const size_t address_len, const void_allocator_t& a)
-        : address(address_, address_len, a)
+    cache_entry(const zend_string& addr, const void_allocator_t& a)
+        : address(addr, a)
     {
     }
 
@@ -120,41 +129,49 @@ typedef lru_cache_t::index<entry_address>::type lru_cache_by_address_t;
 typedef lru_cache_t::index<entry_expiration>::type lru_cache_by_expiration_t;
 typedef lru_cache_t::index<entry_last_used>::type lru_cache_by_last_used_t;
 
-class zval_visitor : public boost::static_visitor<>
+class zval_visitor : public boost::static_visitor<zval>
 {
   public:
-    void
-    operator()(const b::blank& data, zval* dst) const
+    zval
+    operator()(const b::blank& data) const
     {
-        ZVAL_NULL(dst);
+        zval ret;
+        ZVAL_NULL(&ret);
+        return ret;
     }
 
-    void
-    operator()(const long& l, zval* dst) const
+    zval
+    operator()(const long& l) const
     {
-        ZVAL_LONG(dst, l);
+        zval ret;
+        ZVAL_LONG(&ret, l);
+        return ret;
     }
 
-    void
-    operator()(const double& l, zval* dst) const
+    zval
+    operator()(const double& l) const
     {
-        ZVAL_DOUBLE(dst, l);
+        zval ret;
+        ZVAL_DOUBLE(&ret, l);
+        return ret;
     }
 
-    void
-    operator()(const serialized_t& ser, zval* dst) const
+    zval
+    operator()(const serialized_t& ser) const
     {
+        zval ret;
         const unsigned char* tmp = (unsigned char*) ser.c_str();
         php_unserialize_data_t var_hash;
         PHP_VAR_UNSERIALIZE_INIT(var_hash);
-        if (!php_var_unserialize(dst, &tmp, (unsigned char*) ser.c_str() + ser.size(), &var_hash)) {
+        if (!php_var_unserialize(&ret, &tmp, (unsigned char*) ser.c_str() + ser.size(), &var_hash)) {
             PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
             // @TODO: Convert to exception or err string?
             php_error_docref(NULL, E_WARNING, "Error unserializing at offset %ld of %ld bytes",
                              (zend_long)(tmp - (unsigned char*) ser.c_str()), (zend_long) ser.size());
-            ZVAL_FALSE(dst);
+            ZVAL_FALSE(&ret);
         }
         PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
+        return ret;
     }
 };
 
@@ -285,36 +302,24 @@ class uc_storage
     // === Shared Locking ===
 
     b::optional<lru_cache_by_address_t::iterator>
-    get_iterator(const char* address, const size_t address_len)
+    get_iterator(const zend_string& address)
     {
-        struct sized_c_str {
-            const char* address;
-            const size_t address_len;
-
-            sized_c_str(const char* address_, const size_t address_len_)
-                : address(address_)
-                , address_len(address_len_)
-            {
-            }
-        };
-
         struct compare_addresses {
             bool
-            operator()(const sized_c_str& s0, const address_t& s1) const
+            operator()(const zend_string& s0, const address_t& s1) const
             {
-                return std::memcmp(s0.address, s1.c_str(), std::min(s0.address_len, s1.size())) < 0;
+                return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) < 0;
             }
 
             bool
-            operator()(const address_t& s0, const sized_c_str& s1) const
+            operator()(const address_t& s0, const zend_string& s1) const
             {
-                return std::memcmp(s0.c_str(), s1.address, std::min(s0.size(), s1.address_len)) < 0;
+                return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) < 0;
             }
         };
 
-        sized_c_str lookup_addr(address, address_len);
         bip::sharable_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-        lru_cache_by_address_t::iterator it = m_cache->get<entry_address>().find(lookup_addr, compare_addresses());
+        lru_cache_by_address_t::iterator it = m_cache->get<entry_address>().find(address, compare_addresses());
 
         // Compare here so it's not necessary for the caller to lock to see
         // if the result of the lookup is "not found."
@@ -462,8 +467,8 @@ class uc_storage
         m_cache->clear();
     }
 
-    bool
-    store(cache_entry&& e, bool exclusive = false)
+    success_t
+    store(cache_entry&& e, zend_bool exclusive = false)
     {
         bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
 
@@ -487,7 +492,7 @@ class uc_storage
     }
 
     b::optional<value_t>
-    increment(lru_cache_by_address_t::iterator& it, long step)
+    increment(lru_cache_by_address_t::iterator& it, const long step)
     {
         auto bound_visitor    = std::bind(increment_visitor(), std::placeholders::_1, step);
         auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
@@ -507,10 +512,10 @@ class uc_storage
         return next_value;
     }
 
-    bool
-    del(const char* addr, const size_t addr_len)
+    success_t
+    del(const zend_string& addr)
     {
-        auto it_optional = get_iterator(addr, addr_len);
+        auto it_optional = get_iterator(addr);
         if (b::none == it_optional) {
             return false;
         }
@@ -552,85 +557,113 @@ class uc_storage
     // === Indirect Locking (in Called Functions) ===
 
     bool
-    contains(const char* address, const size_t address_len)
+    contains(const zend_string& address)
     {
-        return b::none != get_iterator(address, address_len);
+        return b::none != get_iterator(address);
     }
 
-    bool
-    get(const char* addr, const size_t addr_len, zval* dst)
+    zval_and_success
+    get(const zend_string& addr)
     {
-        auto it_optional = get_iterator(addr, addr_len);
+        zval_and_success ret;
+        auto it_optional = get_iterator(addr);
 
         if (b::none == it_optional) {
-            ZVAL_FALSE(dst);
-            return false;
+            ZVAL_FALSE(&(ret.val));
+            ret.success = false;
+            return ret;
         }
 
         bump_if_necessary(*it_optional);
 
-        auto bound_visitor = std::bind(zval_visitor(), std::placeholders::_1, dst);
-        b::apply_visitor(bound_visitor, (*it_optional)->data);
-        return true;
+        ret.val = b::apply_visitor(zval_visitor(), (*it_optional)->data);
+        ret.success = true;
+        return ret;
     }
 
-    bool
-    store(const char* addr,
-          const size_t addr_len,
-          const char* val,
-          const size_t val_size,
+    success_t
+    store(const zend_string& addr,
+          const zval &val,
           const time_t expiration = 0,
-          bool exclusive          = false)
+          const bool exclusive = false)
     {
-        cache_entry entry(addr, addr_len, m_allocator);
-        serialized_t s(val, val_size, m_allocator);
-        entry.data       = std::move(s);
+        cache_entry entry(addr, m_allocator);
         entry.expiration = expiration;
+
+        if (Z_TYPE_P(&val) == IS_LONG) {
+            entry.data = Z_LVAL_P(&val);
+        } else {
+            smart_str strbuf = { 0 };
+            php_serialize_data_t var_hash;
+            PHP_VAR_SERIALIZE_INIT(var_hash);
+            php_var_serialize(&strbuf, (zval*) &val, &var_hash);
+            PHP_VAR_SERIALIZE_DESTROY(var_hash);
+
+            // A null string from serialization indicates that serialization failed.
+            if (strbuf.s == NULL) {
+                return 0;
+            }
+
+            // An exception indicates a serialization failure.
+            if (EG(exception)) {
+                smart_str_free(&strbuf);
+                return 0;
+            }
+
+            serialized_t s(*strbuf.s, m_allocator);
+            smart_str_free(&strbuf);
+            entry.data       = std::move(s);
+        }
+
         return store(std::move(entry), exclusive);
     }
 
-    bool
-    store(const char* addr, const size_t addr_len, const long val, const time_t expiration = 0, bool exclusive = false)
+    success_t
+    store(const zend_string& addr, const long val)
     {
-        cache_entry entry(addr, addr_len, m_allocator);
+        cache_entry entry(addr, m_allocator);
         entry.data       = val;
-        entry.expiration = expiration;
-        return store(std::move(entry), exclusive);
+        entry.expiration = 0;
+        return store(std::move(entry), 0);
     }
 
-    bool
-    increment_or_initialize(const char* addr, const size_t addr_len, long step, zval* dst)
+    zval_and_success
+    increment_or_initialize(const zend_string& addr, const long step)
     {
-        auto it_optional = get_iterator(addr, addr_len);
+        zval_and_success ret;
+        auto it_optional = get_iterator(addr);
         b::optional<value_t> next_value;
 
         // If there's no value yet, initialize it to the step value.
         if (b::none == it_optional) {
             next_value = step;
-            if (!store(addr, addr_len, step)) {
-                return false;
+            if (!store(addr, step)) {
+                ret.success = true;
             }
         } else {
             next_value = increment(*it_optional, step);
             if (b::none == next_value) {
-                return false;
+                ZVAL_NULL(&(ret.val));
+                ret.success = false;
             }
         }
 
         // Convert to a zval
-        auto bound_visitor = std::bind(zval_visitor(), std::placeholders::_1, dst);
-        b::apply_visitor(bound_visitor, *next_value);
-        return true;
+        ret.val = b::apply_visitor(zval_visitor(), *next_value);
+        ret.success = true;
+        return ret;
     }
 
-    bool
-    cas(const char* addr, const size_t addr_len, long next, long expected)
+    success_t
+    cas(const zend_string& addr, const long next, const long expected)
     {
-        auto it_optional = get_iterator(addr, addr_len);
+        // @TODO: Add proper locking here.
+
+        auto it_optional = get_iterator(addr);
 
         // If there's no value there, succeed without comparison.
         if (b::none == it_optional) {
-            return store(addr, addr_len, next);
+            return store(addr, next);
         }
 
         // If the value doesn't match what's expected (or is the wrong type), fail.
@@ -640,127 +673,82 @@ class uc_storage
         }
 
         // Store the new value.
-        return store(addr, addr_len, next);
+        return store(addr, next);
     }
 };
 
 extern "C" {
 
 uc_storage_t
-uc_storage_init(size_t size, char** errptr)
+uc_storage_init(const size_t size)
 {
-    *errptr = NULL;
-
     try {
         uc_storage* storage_inst = new uc_storage(size);
         return storage_inst;
     } catch (bip::interprocess_exception& ex) {
-        asprintf(errptr, "Error while initializing interprocess storage: %s", ex.what());
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Error while initializing interprocess storage: %s", ex.what());
     }
     return 0;
 }
 
 size_t
-uc_storage_size(uc_storage_t st_opaque, char** errptr)
+uc_storage_size(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
     return st->size();
 }
 
-int
-uc_storage_increment(
-  uc_storage_t st_opaque, const char* address, size_t address_len, long step, zval** dst, char** errptr)
+zval_and_success uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    return st->increment_or_initialize(address, address_len, step, *dst);
+    return st->increment_or_initialize(*address, step);
 }
 
-int
-uc_storage_cas(uc_storage_t st_opaque, const char* address, size_t address_len, long next, long expected, char** errptr)
+success_t uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    return st->cas(address, address_len, next, expected);
+    return st->cas(*address, next, expected);
 }
 
-int
-uc_storage_store(uc_storage_t st_opaque,
-                 const char* address,
-                 size_t address_len,
-                 const char* data,
-                 size_t data_size,
-                 time_t expiration,
-                 int exclusive,
-                 char** errptr)
+success_t uc_storage_store(uc_storage_t st_opaque,
+                     const zend_string* address,
+                     const zval* data,
+                     time_t expiration,
+                     zend_bool exclusive)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    return st->store(address, address_len, data, data_size, expiration, exclusive);
+    return st->store(*address, *data, expiration, exclusive);
 }
 
-int
-uc_storage_store_long(uc_storage_t st_opaque,
-                      const char* address,
-                      size_t address_len,
-                      const long data,
-                      time_t expiration,
-                      int exclusive,
-                      char** errptr)
+zval_and_success uc_storage_get(uc_storage_t st_opaque, const zend_string* address)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    bool success;
-    success = st->store(address, address_len, data, expiration, exclusive);
-    return success;
+    return st->get(*address);
 }
 
-int
-uc_storage_get(uc_storage_t st_opaque, const char* address, size_t address_len, zval** dst, char** errptr)
+success_t uc_storage_exists(uc_storage_t st_opaque, const zend_string* address)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    bool success   = st->get(address, address_len, *dst);
-    return success;
+    return st->contains(*address);
 }
 
-int
-uc_storage_exists(uc_storage_t st_opaque, const char* address, size_t address_len, char** errptr)
+success_t uc_storage_delete(uc_storage_t st_opaque, const zend_string* address)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    return st->contains(address, address_len);
-}
-
-int
-uc_storage_delete(uc_storage_t st_opaque, const char* address, size_t address_len, char** errptr)
-{
-    uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
-    return st->del(address, address_len);
+    return st->del(*address);
 }
 
 void
-uc_storage_clear(uc_storage_t st_opaque, char** errptr)
+uc_storage_clear(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
     st->clear();
 }
 
-void
-uc_storage_dump(uc_storage_t st_opaque, char** errptr)
+void uc_storage_dump(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    *errptr        = NULL;
     st->dump();
-}
-
-void
-uc_string_free(char* strptr)
-{
-    free(strptr);
 }
 
 } // extern "C"
