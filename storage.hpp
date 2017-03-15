@@ -34,10 +34,10 @@ typedef struct {
 
 uc_storage_t uc_storage_init(const size_t size);
 success_t uc_storage_store(uc_storage_t st_opaque,
-                     const zend_string* address,
-                     const zval* data,
-                     const time_t expiration,
-                     const zend_bool exclusive);
+                           const zend_string* address,
+                           const zval* data,
+                           const time_t expiration,
+                           const zend_bool exclusive);
 
 zval_and_success uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step);
 success_t uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected);

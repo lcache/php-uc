@@ -70,9 +70,9 @@ typedef bip::basic_string<char, std::char_traits<char>, string_allocator_t> stri
 
 class zstring_t : public string_t
 {
-public:
+  public:
     zstring_t(const zend_string& data, const allocator_type& a)
-    : string_t(ZSTR_VAL(&data), ZSTR_LEN(&data), a)
+        : string_t(ZSTR_VAL(&data), ZSTR_LEN(&data), a)
     {
     }
 };
@@ -208,7 +208,7 @@ class increment_visitor : public boost::static_visitor<b::optional<value_t>>
         zval zcurrent;
         value_t ret;
 
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
+        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Converting to ZVAL_LONG");
 
         ZVAL_LONG(&zcurrent, i);
         ZVAL_LONG(&zstep, step);
@@ -502,7 +502,7 @@ class uc_storage
             return b::none;
         }
 
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to get next value");
+        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to get next value");
 
         value_t next_value = *next_value_maybe;
 
@@ -578,16 +578,13 @@ class uc_storage
 
         bump_if_necessary(*it_optional);
 
-        ret.val = b::apply_visitor(zval_visitor(), (*it_optional)->data);
+        ret.val     = b::apply_visitor(zval_visitor(), (*it_optional)->data);
         ret.success = true;
         return ret;
     }
 
     success_t
-    store(const zend_string& addr,
-          const zval &val,
-          const time_t expiration = 0,
-          const bool exclusive = false)
+    store(const zend_string& addr, const zval& val, const time_t expiration = 0, const bool exclusive = false)
     {
         cache_entry entry(addr, m_allocator);
         entry.expiration = expiration;
@@ -614,7 +611,7 @@ class uc_storage
 
             serialized_t s(*strbuf.s, m_allocator);
             smart_str_free(&strbuf);
-            entry.data       = std::move(s);
+            entry.data = std::move(s);
         }
 
         return store(std::move(entry), exclusive);
@@ -653,7 +650,7 @@ class uc_storage
                 ZVAL_NULL(&(ret.val));
             } else {
                 // Convert to a zval
-                ret.val = b::apply_visitor(zval_visitor(), *next_value);
+                ret.val     = b::apply_visitor(zval_visitor(), *next_value);
                 ret.success = true;
             }
         }
@@ -705,41 +702,44 @@ uc_storage_size(uc_storage_t st_opaque)
     return st->size();
 }
 
-zval_and_success uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step)
+zval_and_success
+uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->increment_or_initialize(*address, step);
 }
 
-success_t uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected)
+success_t
+uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->cas(*address, next, expected);
 }
 
-success_t uc_storage_store(uc_storage_t st_opaque,
-                     const zend_string* address,
-                     const zval* data,
-                     time_t expiration,
-                     zend_bool exclusive)
+success_t
+uc_storage_store(
+  uc_storage_t st_opaque, const zend_string* address, const zval* data, time_t expiration, zend_bool exclusive)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->store(*address, *data, expiration, exclusive);
 }
 
-zval_and_success uc_storage_get(uc_storage_t st_opaque, const zend_string* address)
+zval_and_success
+uc_storage_get(uc_storage_t st_opaque, const zend_string* address)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->get(*address);
 }
 
-success_t uc_storage_exists(uc_storage_t st_opaque, const zend_string* address)
+success_t
+uc_storage_exists(uc_storage_t st_opaque, const zend_string* address)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->contains(*address);
 }
 
-success_t uc_storage_delete(uc_storage_t st_opaque, const zend_string* address)
+success_t
+uc_storage_delete(uc_storage_t st_opaque, const zend_string* address)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     return st->del(*address);
@@ -752,7 +752,8 @@ uc_storage_clear(uc_storage_t st_opaque)
     st->clear();
 }
 
-void uc_storage_dump(uc_storage_t st_opaque)
+void
+uc_storage_dump(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
     st->dump();
