@@ -241,7 +241,7 @@ PHP_FUNCTION(uc_inc)
         ZVAL_TRUE(success);
     }
 
-    RETURN_ZVAL(&ret.val, 1, 1);
+    RETURN_ZVAL(&ret.val, 1, 0);
 }
 /* }}} */
 
@@ -270,7 +270,7 @@ PHP_FUNCTION(uc_dec)
         ZVAL_TRUE(success);
     }
 
-    RETURN_ZVAL(&ret.val, 1, 1);
+    RETURN_ZVAL(&ret.val, 1, 0);
 }
 /* }}} */
 
@@ -351,7 +351,7 @@ PHP_FUNCTION(uc_fetch)
             RETURN_ZVAL(&(ret.val), 0, 1);
         } else if (Z_TYPE_P(key) == IS_ARRAY) {
             HashPosition hpos;
-            zval* hentry;
+            const zval* hentry;
             zval retarray;
 
             array_init(&retarray);
