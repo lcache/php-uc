@@ -44,7 +44,7 @@ success_t uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, con
 void uc_storage_clear(uc_storage_t st_opaque);
 zval_and_success uc_storage_get(uc_storage_t st_opaque, const zend_string* address, const time_t now);
 size_t uc_storage_size(uc_storage_t st_opaque);
-success_t uc_storage_exists(uc_storage_t st_opaque, const zend_string* address);
+success_t uc_storage_exists(uc_storage_t st_opaque, const zend_string* address, const time_t now);
 void uc_storage_dump(uc_storage_t st_opaque);
 success_t uc_storage_delete(uc_storage_t st_opaque, const zend_string* address);
 

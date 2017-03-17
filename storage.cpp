@@ -302,7 +302,7 @@ class uc_storage
     // === Shared Locking ===
 
     b::optional<lru_cache_by_address_t::iterator>
-    get_iterator(const zend_string& address)
+    get_iterator(const zend_string& address, const time_t now = 0)
     {
         struct compare_addresses {
             bool
@@ -324,6 +324,11 @@ class uc_storage
         // Compare here so it's not necessary for the caller to lock to see
         // if the result of the lookup is "not found."
         if (m_cache->end() == it) {
+            return b::none;
+        }
+
+        // An expired item is as good as none.
+        if (now > 0 && it->expiration > 0 && it->expiration < now) {
             return b::none;
         }
 
@@ -559,16 +564,16 @@ class uc_storage
     // === Indirect Locking (in Called Functions) ===
 
     bool
-    contains(const zend_string& address)
+    contains(const zend_string& address, const time_t now)
     {
-        return b::none != get_iterator(address);
+        return b::none != get_iterator(address, now);
     }
 
     zval_and_success
-    get(const zend_string& addr)
+    get(const zend_string& addr, const time_t now)
     {
         zval_and_success ret;
-        auto it_optional = get_iterator(addr);
+        auto it_optional = get_iterator(addr, now);
 
         if (b::none == it_optional) {
             ZVAL_FALSE(&(ret.val));
@@ -728,14 +733,14 @@ zval_and_success
 uc_storage_get(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->get(*address);
+    return st->get(*address, now);
 }
 
 success_t
-uc_storage_exists(uc_storage_t st_opaque, const zend_string* address)
+uc_storage_exists(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->contains(*address);
+    return st->contains(*address, now);
 }
 
 success_t

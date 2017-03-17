@@ -131,7 +131,7 @@ uc_cache_store(const zend_string* key, const zval* val, const size_t ttl, const 
     time_t expiration = 0;
 
     if (ttl > 0) {
-        expiration = time(0) + ttl;
+        expiration = uc_time() + ttl;
     }
 
     return uc_storage_store(UC_G(storage), key, val, expiration, exclusive);
@@ -455,8 +455,7 @@ PHP_FUNCTION(uc_exists)
         return;
     }
 
-    // @TODO: Make configurable.
-    t = time(0);
+    t = uc_time();
 
     if (Z_TYPE_P(key) != IS_STRING && Z_TYPE_P(key) != IS_ARRAY) {
         convert_to_string(key);
@@ -464,7 +463,7 @@ PHP_FUNCTION(uc_exists)
 
     if (Z_TYPE_P(key) == IS_STRING) {
         if (Z_STRLEN_P(key)) {
-            found = uc_storage_exists(UC_G(storage), Z_STR_P(key));
+            found = uc_storage_exists(UC_G(storage), Z_STR_P(key), t);
             if (found) {
                 RETURN_TRUE;
             } else {
@@ -480,7 +479,7 @@ PHP_FUNCTION(uc_exists)
         zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
         while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
             if (Z_TYPE_P(hentry) == IS_STRING) {
-                found = uc_storage_exists(UC_G(storage), Z_STR_P(hentry));
+                found = uc_storage_exists(UC_G(storage), Z_STR_P(hentry), t);
                 if (found) {
                     add_assoc_bool(return_value, Z_STRVAL_P(hentry), 1);
                 }
