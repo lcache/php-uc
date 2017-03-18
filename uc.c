@@ -129,12 +129,13 @@ uc_cache_store(const zend_string* key, const zval* val, const size_t ttl, const 
     char* err;
     int success       = 0;
     time_t expiration = 0;
+    time_t now = uc_time();
 
     if (ttl > 0) {
         expiration = uc_time() + ttl;
     }
 
-    return uc_storage_store(UC_G(storage), key, val, expiration, exclusive);
+    return uc_storage_store(UC_G(storage), key, val, expiration, exclusive, now);
 }
 /* }}} */
 
@@ -224,6 +225,7 @@ PHP_FUNCTION(uc_inc)
     zend_long step = 1;
     zval* success  = NULL;
     zval_and_success ret;
+    time_t now = uc_time();
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
         return;
@@ -235,7 +237,7 @@ PHP_FUNCTION(uc_inc)
         ZVAL_FALSE(success);
     }
 
-    ret = uc_storage_increment(UC_G(storage), key, step);
+    ret = uc_storage_increment(UC_G(storage), key, step, now);
 
     if (success && ret.success) {
         ZVAL_TRUE(success);
@@ -253,6 +255,7 @@ PHP_FUNCTION(uc_dec)
     zend_long step = 1;
     zval* success  = NULL;
     zval_and_success ret;
+    time_t now = uc_time();
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "S|lz", &key, &step, &success) == FAILURE) {
         return;
@@ -264,7 +267,7 @@ PHP_FUNCTION(uc_dec)
         ZVAL_FALSE(success);
     }
 
-    ret = uc_storage_increment(UC_G(storage), key, -step);
+    ret = uc_storage_increment(UC_G(storage), key, -step, now);
 
     if (success && ret.success) {
         ZVAL_TRUE(success);
@@ -283,12 +286,13 @@ PHP_FUNCTION(uc_cas)
     zend_long vals[2];
     zval* new_val;
     zend_bool success;
+    time_t now = uc_time();
 
     if (zend_parse_parameters(ZEND_NUM_ARGS(), "Sll", &key, &vals[0], &vals[1]) == FAILURE) {
         return;
     }
 
-    success = uc_storage_cas(UC_G(storage), key, vals[1], vals[0]);
+    success = uc_storage_cas(UC_G(storage), key, vals[1], vals[0], now);
 
     if (success) {
         RETURN_TRUE;
@@ -319,7 +323,7 @@ PHP_FUNCTION(uc_fetch)
 {
     zval* key;
     zval* success = NULL;
-    time_t t;
+    time_t now;
     zval_and_success ret;
 
     if (!UC_G(enabled)) {
@@ -330,7 +334,7 @@ PHP_FUNCTION(uc_fetch)
         return;
     }
 
-    t = uc_time();
+    now = uc_time();
 
     if (success) {
         ZVAL_DEREF(success);
@@ -344,7 +348,7 @@ PHP_FUNCTION(uc_fetch)
 
     if (Z_TYPE_P(key) == IS_ARRAY || (Z_TYPE_P(key) == IS_STRING && Z_STRLEN_P(key) > 0)) {
         if (Z_TYPE_P(key) == IS_STRING) {
-            ret = uc_storage_get(UC_G(storage), Z_STR_P(key), t);
+            ret = uc_storage_get(UC_G(storage), Z_STR_P(key), now);
             if (success && ret.success) {
                 ZVAL_TRUE(success);
             }
@@ -358,7 +362,7 @@ PHP_FUNCTION(uc_fetch)
             zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
             while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
                 if (Z_TYPE_P(hentry) == IS_STRING) {
-                    zval_and_success result_entry = uc_storage_get(UC_G(storage), Z_STR_P(hentry), t);
+                    zval_and_success result_entry = uc_storage_get(UC_G(storage), Z_STR_P(hentry), now);
                     if (result_entry.success) {
                         add_assoc_zval(&retarray, Z_STRVAL_P(hentry), &(result_entry.val));
                     }
@@ -386,6 +390,7 @@ PHP_FUNCTION(uc_fetch)
 PHP_FUNCTION(uc_delete)
 {
     zval* keys;
+    time_t now;
 
     if (!UC_G(enabled)) {
         RETURN_FALSE;
@@ -395,12 +400,14 @@ PHP_FUNCTION(uc_delete)
         return;
     }
 
+    now = uc_time();
+
     if (Z_TYPE_P(keys) == IS_STRING) {
         if (!Z_STRLEN_P(keys)) {
             RETURN_FALSE;
         }
 
-        if (uc_storage_delete(UC_G(storage), Z_STR_P(keys))) {
+        if (uc_storage_delete(UC_G(storage), Z_STR_P(keys), now)) {
             RETURN_TRUE;
         } else {
             RETURN_FALSE;
@@ -419,7 +426,7 @@ PHP_FUNCTION(uc_delete)
                                  "uc_delete() expects a string, array of strings, or UCIterator instance.");
                 add_next_index_zval(return_value, hentry);
                 Z_ADDREF_P(hentry);
-            } else if (uc_storage_delete(UC_G(storage), Z_STR_P(hentry)) != 1) {
+            } else if (uc_storage_delete(UC_G(storage), Z_STR_P(hentry), now) != 1) {
                 add_next_index_zval(return_value, hentry);
                 Z_ADDREF_P(hentry);
             }

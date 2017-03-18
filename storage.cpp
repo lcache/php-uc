@@ -10,6 +10,9 @@
 #include <boost/interprocess/containers/list.hpp>
 #include <boost/interprocess/containers/map.hpp>
 
+#define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
+#define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
+
 #include <boost/multi_index/hashed_index.hpp>
 #include <boost/multi_index/identity.hpp>
 #include <boost/multi_index/member.hpp>
@@ -25,7 +28,9 @@
 #include <boost/interprocess/smart_ptr/unique_ptr.hpp>
 
 #include <boost/interprocess/sync/interprocess_sharable_mutex.hpp>
+#include <boost/interprocess/sync/interprocess_upgradable_mutex.hpp>
 #include <boost/interprocess/sync/sharable_lock.hpp>
+#include <boost/interprocess/sync/upgradable_lock.hpp>
 
 #include <boost/functional/hash.hpp>
 #include <boost/optional.hpp>
@@ -280,6 +285,22 @@ class cas_match_visitor : public boost::static_visitor<bool>
     }
 };
 
+typedef bip::sharable_lock<bip::interprocess_upgradable_mutex> shared_lock_t;
+typedef bip::scoped_lock<bip::interprocess_upgradable_mutex> exclusive_lock_t;
+typedef bip::upgradable_lock<bip::interprocess_upgradable_mutex> upgradable_lock_t;
+typedef b::variant<shared_lock_t, exclusive_lock_t, upgradable_lock_t> shared_lock_or_stronger_t;
+
+class owns_lock_visitor : public boost::static_visitor<bool>
+{
+  public:
+    template <typename T>
+    bool
+    operator()(const T& lock) const
+    {
+        return lock.owns();
+    }
+};
+
 class uc_storage
 {
   protected:
@@ -289,20 +310,18 @@ class uc_storage
     memory_t m_segment;
     void_allocator_t m_allocator;
     std::unique_ptr<lru_cache_t> m_cache;
-    bip::interprocess_sharable_mutex m_cache_mutex;
+    mutable bip::interprocess_upgradable_mutex m_cache_mutex;
 
-    // === No Locking ===
-
+    // Precondition: Lock held if reference to shared memory.
     size_t
-    get_cost(const cache_entry& entry)
+    get_cost(const cache_entry& entry) const
     {
         return b::apply_visitor(cost_visitor(), entry.data);
     }
 
-    // === Shared Locking ===
-
+    // Precondition: Shared lock or stronger is held.
     b::optional<lru_cache_by_address_t::iterator>
-    get_iterator(const zend_string& address, const time_t now = 0)
+    get_iterator(const zend_string& address, const time_t now) const
     {
         struct compare_addresses {
             bool
@@ -318,11 +337,8 @@ class uc_storage
             }
         };
 
-        bip::sharable_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-        lru_cache_by_address_t::iterator it = m_cache->get<entry_address>().find(address, compare_addresses());
+        auto it = m_cache->get<entry_address>().find(address, compare_addresses());
 
-        // Compare here so it's not necessary for the caller to lock to see
-        // if the result of the lookup is "not found."
         if (m_cache->end() == it) {
             return b::none;
         }
@@ -340,20 +356,36 @@ class uc_storage
         return it;
     }
 
-    bool
-    needs_bump(const lru_cache_t::iterator& it)
+    // Precondition: Shared lock or stronger is held.
+    b::optional<lru_cache_by_address_t::iterator>
+    get_iterator(const address_t& address, const time_t now) const
     {
-        bip::sharable_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        auto it = m_cache->get<entry_address>().find(address);
 
-        const lru_cache_t::size_type rank  = m_cache->get<entry_last_used>().find_rank(it->last_used);
-        const lru_cache_t::size_type count = m_cache->get<entry_last_used>().size();
+        if (m_cache->end() == it) {
+            return b::none;
+        }
+
+        // An expired item is as good as none.
+        if (now > 0 && it->expiration > 0 && it->expiration < now) {
+            return b::none;
+        }
+
+        return it;
+    }
+
+    bool
+    needs_bump(const lru_cache_t::iterator& it) const
+    {
+        shared_lock_t lock(m_cache_mutex);
+        const auto rank  = m_cache->get<entry_last_used>().find_rank(it->last_used);
+        const auto count = m_cache->get<entry_last_used>().size();
 
         // If the entry is in oldest 25% used.
         return (rank < (count * 0.25));
     }
 
-    // === Exclusive Locking ==
-
+    // Precondition: No locks held.
     bool
     bump(const lru_cache_t::iterator& it)
     {
@@ -373,17 +405,14 @@ class uc_storage
             time_t new_last_used;
         };
 
-        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        exclusive_lock_t lock(m_cache_mutex);
         return m_cache->modify(it, bump_cache_entry_last_used(time(0)));
     }
 
-    // === Exclusive Lock Already Held ==
-
+    // Precondition: No locks held.
     bool
-    free_space(const bip::scoped_lock<bip::interprocess_sharable_mutex>& lock, size_t space_needed)
+    free_space(size_t space_needed, const time_t now)
     {
-        assert(lock.owns());
-
         // If we have enough space, it's a trivial success.
         if (space_needed <= m_capacity - m_used) {
             return true;
@@ -395,8 +424,9 @@ class uc_storage
             return false;
         }
 
+        exclusive_lock_t lock(m_cache_mutex);
+
         // First, evict everything that can expire and is expired, up to the space needed.
-        time_t now = time(0);
         lru_cache_by_expiration_t::iterator it_l =
           m_cache->get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
         lru_cache_by_expiration_t::iterator it_u = m_cache->get<entry_expiration>().upper_bound(now);
@@ -426,10 +456,9 @@ class uc_storage
         return false;
     }
 
-    // === Indirect Locking (in Called Functions) ===
-
     // Returns true if the entry has (or has been made to have) an
     // appropriate last_used rank.
+    // Precondition: No locks held.
     bool
     bump_if_necessary(const lru_cache_t::iterator& it)
     {
@@ -455,105 +484,102 @@ class uc_storage
     ~uc_storage()
     {
     }
-    // === No Locking ===
 
+    // Precondition: No locks held.
     size_t
     capacity() const
     {
         return m_capacity;
     }
 
-    // === Exclusive Locking ===
-
+    // Precondition: No locks held.
     void
     clear()
     {
-        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        exclusive_lock_t lock(m_cache_mutex);
         m_cache->clear();
     }
 
+    // Precondition: No locks held.
     success_t
-    store(cache_entry&& e, zend_bool exclusive = false)
+    store_exclusive(cache_entry&& e, const time_t now)
     {
-        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-
-        bool success = free_space(lock, get_cost(e));
+        bool success = free_space(get_cost(e), now);
         if (!success) {
             return false;
         }
 
-        // Attempt to insert. This will fail if the entry already exists.
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
-
-        // std::pair<lru_cache_by_address_t::iterator,bool> res = m_cache->get<entry_address>().emplace(addr, addr_len,
-        // val, val_size, expiration, m_allocator);
-
-        // Replace on collision, using the matching entry as the position.
-        if (!exclusive && !res.second) {
-            res.second = m_cache->get<entry_address>().replace(res.first, std::move(e));
+        // We use an upgradable lock here because, if exclusive == true,
+        // then we may not need to block reads at all. But, if we need to
+        // upgrade, then it must be done atomically. So, we cannot start with
+        // a shared lock.
+        upgradable_lock_t ulock(m_cache_mutex);
+        auto it_optional = get_iterator(e.address, now);
+        if (it_optional == b::none) {
+            // We actually have to perform the insertion, so we now wait on
+            // shared locks to release.
+            exclusive_lock_t xlock(std::move(ulock));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
+            return res.second;
         }
-
-        return res.second;
+        return false;
     }
 
-    b::optional<value_t>
-    increment(lru_cache_by_address_t::iterator& it, const long step)
-    {
-        auto bound_visitor    = std::bind(increment_visitor(), std::placeholders::_1, step);
-        auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
-
-        // If there is no current, eligible value, we cannot increment.
-        if (b::none == next_value_maybe) {
-            return b::none;
-        }
-
-        // php_error_docref(NULL TSRMLS_CC, E_NOTICE, "About to get next value");
-
-        value_t next_value = *next_value_maybe;
-
-        // Apply the increment.
-        bump_if_necessary(it);
-        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-
-        m_cache->modify(it, set_entry_value(next_value));
-        return next_value;
-    }
-
+    // Precondition: No locks held.
     success_t
-    del(const zend_string& addr)
+    store(cache_entry&& e, const time_t now)
     {
-        auto it_optional = get_iterator(addr);
-        if (b::none == it_optional) {
+        bool success = free_space(get_cost(e), now);
+        if (!success) {
             return false;
         }
 
-        // Only grab an exclusive lock if we actually need to erase it.
-        bip::scoped_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-        m_cache->get<entry_address>().erase(*it_optional);
-        return true;
+        exclusive_lock_t lock(m_cache_mutex);
+        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
+
+        // Replace on collision, using the matching entry as the position.
+        if (!res.second) {
+            res.second = m_cache->get<entry_address>().replace(res.first, std::move(e));
+        }
+        return res.second;
     }
 
-    // === Shared Locking ===
-
-    bool
-    empty()
+    // Precondition: No locks held.
+    success_t
+    del(const zend_string& addr, const time_t now)
     {
-        bip::sharable_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        upgradable_lock_t ulock(m_cache_mutex);
+        auto it_optional = get_iterator(addr, now);
+        if (b::none != it_optional) {
+            // Only upgrade to an exclusive lock if we actually need to erase it.
+            exclusive_lock_t xlock(std::move(ulock));
+            m_cache->get<entry_address>().erase(*it_optional);
+            return true;
+        }
+        return false;
+    }
+
+    // Precondition: No locks held.
+    bool
+    empty() const
+    {
+        shared_lock_t lock(m_cache_mutex);
         return m_cache->empty();
     }
 
+    // Precondition: No locks held.
     size_t
-    size()
+    size() const
     {
-        bip::sharable_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
+        shared_lock_t lock(m_cache_mutex);
         return m_cache->size();
     }
 
+    // Precondition: No locks held.
     void
-    dump()
+    dump() const
     {
-        bip::sharable_lock<bip::interprocess_sharable_mutex> lock(m_cache_mutex);
-
+        shared_lock_t lock(m_cache_mutex);
         for (auto i = m_cache->begin(); i != m_cache->end(); ++i) {
             std::cout << i->address << "=" << i->data << std::endl;
             // std::string k(i->address.begin(), i->address.end());
@@ -561,35 +587,40 @@ class uc_storage
         }
     }
 
-    // === Indirect Locking (in Called Functions) ===
-
+    // Precondition: No locks held.
     bool
-    contains(const zend_string& address, const time_t now)
+    contains(const zend_string& address, const time_t now) const
     {
+        shared_lock_t slock(m_cache_mutex);
         return b::none != get_iterator(address, now);
     }
 
+    // Precondition: No locks held.
     zval_and_success
     get(const zend_string& addr, const time_t now)
     {
         zval_and_success ret;
+        shared_lock_t slock(m_cache_mutex);
         auto it_optional = get_iterator(addr, now);
 
-        if (b::none == it_optional) {
-            ZVAL_FALSE(&(ret.val));
-            ret.success = false;
+        if (b::none != it_optional) {
+            ret.val     = b::apply_visitor(zval_visitor(), (*it_optional)->data);
+            ret.success = true;
+
+            // @TODO: Clean up the following.
+            slock.unlock();  // To allow bump_if_necessary to do its thing.
+            bump_if_necessary(*it_optional);
             return ret;
         }
 
-        bump_if_necessary(*it_optional);
-
-        ret.val     = b::apply_visitor(zval_visitor(), (*it_optional)->data);
-        ret.success = true;
+        ZVAL_FALSE(&(ret.val));
+        ret.success = false;
         return ret;
     }
 
+    // Precondition: No locks held.
     success_t
-    store(const zend_string& addr, const zval& val, const time_t expiration = 0, const bool exclusive = false)
+    store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration = 0, const bool exclusive = false)
     {
         cache_entry entry(addr, m_allocator);
         entry.expiration = expiration;
@@ -619,70 +650,98 @@ class uc_storage
             entry.data = std::move(s);
         }
 
-        return store(std::move(entry), exclusive);
+        if (exclusive) {
+            return store_exclusive(std::move(entry), now);
+        }
+        return store(std::move(entry), now);
     }
 
+    // Precondition: No locks held.
     success_t
-    store(const zend_string& addr, const long val)
+    store(const zend_string& addr, const long val, const time_t now)
     {
         cache_entry entry(addr, m_allocator);
         entry.data       = val;
         entry.expiration = 0;
-        return store(std::move(entry), 0);
+        return store(std::move(entry), now);
     }
 
+    // Precondition: No locks held.
     zval_and_success
-    increment_or_initialize(const zend_string& addr, const long step)
+    increment_or_initialize(const zend_string& addr, const long step, const time_t now)
     {
-        // @TODO: Add proper locking here.
-
         zval_and_success ret;
-        auto it_optional = get_iterator(addr);
+        upgradable_lock_t ulock(m_cache_mutex);
+        auto it_optional = get_iterator(addr, now);
         b::optional<value_t> next_value;
 
         ret.success = false;
 
         // If there's no value yet, initialize it to the step value.
         if (b::none == it_optional) {
-            next_value = step;
-            if (store(addr, step)) {
-                ZVAL_LONG(&ret.val, step);
-                ret.success = true;
-            }
-        } else {
-            next_value = increment(*it_optional, step);
-            if (b::none == next_value) {
-                ZVAL_NULL(&(ret.val));
-            } else {
-                // Convert to a zval
-                ret.val     = b::apply_visitor(zval_visitor(), *next_value);
-                ret.success = true;
-            }
+            cache_entry entry(addr, m_allocator);
+            entry.data = step;
+            exclusive_lock_t xlock(std::move(ulock));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
+            assert(res.second);  // Insertion should always succeed because of the iterator lookup.
+            ZVAL_LONG(&ret.val, step);
+            ret.success = true;
+            return ret;
         }
 
+        auto it = *it_optional;
+        auto bound_visitor    = std::bind(increment_visitor(), std::placeholders::_1, step);
+        auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
+
+        // We can only increment if there was a valid value to increment
+        // already.
+        if (b::none != next_value_maybe) {
+            value_t next_value = *next_value_maybe;
+            exclusive_lock_t xlock(std::move(ulock));
+            m_cache->modify(it, set_entry_value(next_value));
+            ret.val     = b::apply_visitor(zval_visitor(), next_value);
+            ret.success = true;
+
+            // @TODO: Clean up the following.
+            xlock.unlock();  // To allow bump_if_necessary to do its thing.
+            bump_if_necessary(it);
+            return ret;
+        }
+
+        ZVAL_NULL(&ret.val);
         return ret;
     }
 
+    // Precondition: No locks held.
     success_t
-    cas(const zend_string& addr, const long next, const long expected)
+    cas(const zend_string& addr, const long next, const long expected, const time_t now)
     {
-        // @TODO: Add proper locking here.
+        upgradable_lock_t ulock(m_cache_mutex);
 
-        auto it_optional = get_iterator(addr);
+        auto it_optional = get_iterator(addr, now);
 
         // If there's no value there, succeed without comparison.
         if (b::none == it_optional) {
-            return store(addr, next);
+            cache_entry entry(addr, m_allocator);
+            entry.data = next;
+            exclusive_lock_t xlock(std::move(ulock));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
+            assert(res.second);
+            return true;
         }
+
+        auto it = *it_optional;
 
         // If the value doesn't match what's expected (or is the wrong type), fail.
         auto bound_visitor = std::bind(cas_match_visitor(), std::placeholders::_1, expected);
-        if (!b::apply_visitor(bound_visitor, (*it_optional)->data)) {
+        if (!b::apply_visitor(bound_visitor, it->data)) {
             return false;
         }
 
         // Store the new value.
-        return store(addr, next);
+        exclusive_lock_t xlock(std::move(ulock));
+        m_cache->modify(it, set_entry_value(next));
+        return true;
     }
 };
 
@@ -708,25 +767,25 @@ uc_storage_size(uc_storage_t st_opaque)
 }
 
 zval_and_success
-uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step)
+uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->increment_or_initialize(*address, step);
+    return st->increment_or_initialize(*address, step, now);
 }
 
 success_t
-uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected)
+uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->cas(*address, next, expected);
+    return st->cas(*address, next, expected, now);
 }
 
 success_t
 uc_storage_store(
-  uc_storage_t st_opaque, const zend_string* address, const zval* data, time_t expiration, zend_bool exclusive)
+  uc_storage_t st_opaque, const zend_string* address, const zval* data, time_t expiration, zend_bool exclusive, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->store(*address, *data, expiration, exclusive);
+    return st->store(*address, *data, expiration, exclusive, now);
 }
 
 zval_and_success
@@ -744,10 +803,10 @@ uc_storage_exists(uc_storage_t st_opaque, const zend_string* address, const time
 }
 
 success_t
-uc_storage_delete(uc_storage_t st_opaque, const zend_string* address)
+uc_storage_delete(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->del(*address);
+    return st->del(*address, now);
 }
 
 void
