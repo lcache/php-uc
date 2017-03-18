@@ -345,6 +345,7 @@ class uc_storage
 
         // An expired item is as good as none.
         if (now > 0 && it->expiration > 0 && it->expiration < now) {
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Expired: %lu < %lu", it->expiration, now);
             return b::none;
         }
 
@@ -368,6 +369,7 @@ class uc_storage
 
         // An expired item is as good as none.
         if (now > 0 && it->expiration > 0 && it->expiration < now) {
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Expired: %lu < %lu", it->expiration, now);
             return b::none;
         }
 
@@ -519,7 +521,13 @@ class uc_storage
             // We actually have to perform the insertion, so we now wait on
             // shared locks to release.
             exclusive_lock_t xlock(std::move(ulock));
+
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
+
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
+
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
+
             return res.second;
         }
         return false;
@@ -551,9 +559,10 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
         auto it_optional = get_iterator(addr, now);
         if (b::none != it_optional) {
-            // Only upgrade to an exclusive lock if we actually need to erase it.
+            auto it = *it_optional;
+            // Upgrade to an exclusive lock now that we actually need to delete.
             exclusive_lock_t xlock(std::move(ulock));
-            m_cache->get<entry_address>().erase(*it_optional);
+            m_cache->get<entry_address>().erase(it);
             return true;
         }
         return false;
@@ -785,7 +794,7 @@ uc_storage_store(
   uc_storage_t st_opaque, const zend_string* address, const zval* data, time_t expiration, zend_bool exclusive, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->store(*address, *data, expiration, exclusive, now);
+    return st->store(*address, *data, now, expiration, exclusive);
 }
 
 zval_and_success
