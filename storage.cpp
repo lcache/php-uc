@@ -1,4 +1,4 @@
-#include <boost/atomic/atomic.hpp>
+//#include <boost/atomic/atomic.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
 #include <boost/interprocess/anonymous_shared_memory.hpp>
 #include <boost/interprocess/containers/string.hpp>
@@ -6,36 +6,36 @@
 #include <boost/interprocess/managed_shared_memory.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
-#include <boost/interprocess/containers/flat_map.hpp>
-#include <boost/interprocess/containers/list.hpp>
-#include <boost/interprocess/containers/map.hpp>
+//#include <boost/interprocess/containers/flat_map.hpp>
+//#include <boost/interprocess/containers/list.hpp>
+//#include <boost/interprocess/containers/map.hpp>
 
 #define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
 #define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
 
-#include <boost/multi_index/hashed_index.hpp>
-#include <boost/multi_index/identity.hpp>
+//#include <boost/multi_index/hashed_index.hpp>
+//#include <boost/multi_index/identity.hpp>
 #include <boost/multi_index/member.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/ranked_index.hpp>
-#include <boost/multi_index/sequenced_index.hpp>
+//#include <boost/multi_index/sequenced_index.hpp>
 #include <boost/multi_index_container.hpp>
 
-#include <boost/archive/text_oarchive.hpp>
+//#include <boost/archive/text_oarchive.hpp>
 
 #include <boost/variant.hpp>
 
 #include <boost/interprocess/smart_ptr/unique_ptr.hpp>
 
-#include <boost/interprocess/sync/interprocess_sharable_mutex.hpp>
+//#include <boost/interprocess/sync/interprocess_sharable_mutex.hpp>
 #include <boost/interprocess/sync/interprocess_upgradable_mutex.hpp>
 #include <boost/interprocess/sync/sharable_lock.hpp>
 #include <boost/interprocess/sync/upgradable_lock.hpp>
 
-#include <boost/functional/hash.hpp>
+//#include <boost/functional/hash.hpp>
 #include <boost/optional.hpp>
-#include <boost/unordered_map.hpp>
-#include <functional>
+//#include <boost/unordered_map.hpp>
+//#include <functional>
 
 //#include <boost/interprocess/smart_ptr/unique_ptr.hpp>
 
@@ -305,7 +305,7 @@ class uc_storage
 {
   protected:
     size_t m_capacity;
-    boost::atomic<size_t> m_used;
+    std::atomic<size_t> m_used;
     bip::mapped_region m_region;
     memory_t m_segment;
     void_allocator_t m_allocator;
