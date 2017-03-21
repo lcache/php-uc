@@ -344,21 +344,7 @@ class uc_storage
     b::optional<lru_cache_by_address_t::iterator>
     get_iterator(const zend_string& address, const time_t now) const
     {
-        struct compare_addresses {
-            bool
-            operator()(const zend_string& s0, const address_t& s1) const
-            {
-                return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) < 0;
-            }
-
-            bool
-            operator()(const address_t& s0, const zend_string& s1) const
-            {
-                return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) < 0;
-            }
-        };
-
-        auto it = m_cache->get<entry_address>().find(address, compare_addresses());
+        auto it = m_cache->get<entry_address>().find(address);
 
         if (m_cache->end() == it) {
             return b::none;
