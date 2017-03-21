@@ -762,31 +762,49 @@ uc_storage_init(const size_t size)
     try {
         uc_storage* storage_inst = new uc_storage(size);
         return storage_inst;
-    } catch (bip::interprocess_exception& ex) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Error while initializing interprocess storage: %s", ex.what());
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while initializing interprocess storage: %s", ex.what());
     }
-    return 0;
+    return nullptr;
 }
 
 size_t
 uc_storage_size(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->size();
+    try {
+        return st->size();
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_size: %s", ex.what());
+    }
+
+    return 0;
 }
 
 zval_and_success
 uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->increment_or_initialize(*address, step, now);
+    try {
+        return st->increment_or_initialize(*address, step, now);
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_increment: %s", ex.what());
+    }
+
+    zval_and_success failure = {0};
+    return failure;
 }
 
 success_t
 uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->cas(*address, next, expected, now);
+    try {
+        return st->cas(*address, next, expected, now);
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_cas: %s", ex.what());
+    }
+    return 0;
 }
 
 success_t
@@ -794,42 +812,74 @@ uc_storage_store(
   uc_storage_t st_opaque, const zend_string* address, const zval* data, time_t expiration, zend_bool exclusive, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->store(*address, *data, now, expiration, exclusive);
+    try {
+        return st->store(*address, *data, now, expiration, exclusive);
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_store: %s", ex.what());
+    }
+    return 0;
 }
 
 zval_and_success
 uc_storage_get(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->get(*address, now);
+    try {
+        return st->get(*address, now);
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_get: %s", ex.what());
+    }
+
+    zval_and_success failure = {0};
+    return failure;
 }
 
 success_t
 uc_storage_exists(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->contains(*address, now);
+    try {
+        return st->contains(*address, now);
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_exists: %s", ex.what());
+    }
+
+    return 0;
 }
 
 success_t
 uc_storage_delete(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    return st->del(*address, now);
+    try {
+        return st->del(*address, now);
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_delete: %s", ex.what());
+    }
+
+    return 0;
 }
 
 void
 uc_storage_clear(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    st->clear();
+    try {
+        st->clear();
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_clear: %s", ex.what());
+    }
 }
 
 void
 uc_storage_dump(uc_storage_t st_opaque)
 {
     uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    st->dump();
+    try {
+        st->dump();
+    } catch (const std::exception& ex) {
+        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_dump: %s", ex.what());
+    }
 }
 
 } // extern "C"
