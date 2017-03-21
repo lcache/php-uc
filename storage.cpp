@@ -1,43 +1,21 @@
-//#include <boost/atomic/atomic.hpp>
-#include <boost/interprocess/allocators/allocator.hpp>
-#include <boost/interprocess/anonymous_shared_memory.hpp>
-#include <boost/interprocess/containers/string.hpp>
-#include <boost/interprocess/managed_external_buffer.hpp>
 #include <boost/interprocess/managed_shared_memory.hpp>
-#include <boost/interprocess/mapped_region.hpp>
+#include <boost/interprocess/allocators/allocator.hpp>
+#include <boost/interprocess/containers/string.hpp>
 
-//#include <boost/interprocess/containers/flat_map.hpp>
-//#include <boost/interprocess/containers/list.hpp>
-//#include <boost/interprocess/containers/map.hpp>
-
-#define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
-#define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
-
-//#include <boost/multi_index/hashed_index.hpp>
-//#include <boost/multi_index/identity.hpp>
-#include <boost/multi_index/member.hpp>
-#include <boost/multi_index/ordered_index.hpp>
-#include <boost/multi_index/ranked_index.hpp>
-//#include <boost/multi_index/sequenced_index.hpp>
-#include <boost/multi_index_container.hpp>
-
-//#include <boost/archive/text_oarchive.hpp>
-
-#include <boost/variant.hpp>
-
-#include <boost/interprocess/smart_ptr/unique_ptr.hpp>
-
-//#include <boost/interprocess/sync/interprocess_sharable_mutex.hpp>
 #include <boost/interprocess/sync/interprocess_upgradable_mutex.hpp>
 #include <boost/interprocess/sync/sharable_lock.hpp>
 #include <boost/interprocess/sync/upgradable_lock.hpp>
 
-//#include <boost/functional/hash.hpp>
 #include <boost/optional.hpp>
-//#include <boost/unordered_map.hpp>
-//#include <functional>
+#include <boost/variant.hpp>
 
-//#include <boost/interprocess/smart_ptr/unique_ptr.hpp>
+#define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
+#define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
+
+#include <boost/multi_index_container.hpp>
+#include <boost/multi_index/member.hpp>
+#include <boost/multi_index/ordered_index.hpp>
+#include <boost/multi_index/ranked_index.hpp>
 
 #include <atomic>
 #include <iostream>
@@ -62,17 +40,13 @@ namespace bmi = b::multi_index;
 namespace ba  = b::archive;
 
 // Initial shared memory
-typedef bip::managed_external_buffer memory_t;
-// typedef bip::managed_shared_memory memory_t;
-typedef memory_t::segment_manager segment_manager_t;
+typedef bip::managed_shared_memory memory_t;
 
-// A general-purpose allocator.
-typedef bip::allocator<void, segment_manager_t> void_allocator_t;
-
-// Shared memory strings
-typedef bip::allocator<char, segment_manager_t> string_allocator_t;
+// Shared memory strings (with allocator)
+typedef bip::managed_shared_memory::allocator<char>::type string_allocator_t;
 typedef bip::basic_string<char, std::char_traits<char>, string_allocator_t> string_t;
 
+// Extend string_t to allow construction from a zend_string.
 class zstring_t : public string_t
 {
   public:
@@ -81,6 +55,9 @@ class zstring_t : public string_t
     {
     }
 };
+
+//typedef bip::managed_shared_memory::allocator<void>::type void_allocator_t;
+typedef bip::allocator<void, memory_t::segment_manager> void_allocator_t;
 
 // A cache entry and its components
 typedef zstring_t address_t;
@@ -110,9 +87,9 @@ struct cache_entry {
         return address < a;
     }
 };
-typedef bip::allocator<cache_entry, segment_manager_t> cache_entry_allocator_t;
+typedef bip::managed_shared_memory::allocator<cache_entry>::type cache_entry_allocator_t;
 
-// Use MultiIndex for the cache
+// Index tags for MultiIndex
 struct entry_address {
 };
 struct entry_expiration {
@@ -120,7 +97,7 @@ struct entry_expiration {
 struct entry_last_used {
 };
 
-
+// A replacement for std::less that supports comparing with zend_string.
 struct address_less {
     bool
     operator()(const address_t& s0, const address_t& s1) const
@@ -144,7 +121,6 @@ struct address_less {
 typedef b::multi_index_container<
   cache_entry,
   bmi::indexed_by<
-    // bmi::ordered_unique<bmi::tag<entry_address>, bmi::identity<cache_entry> >,
     bmi::ordered_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_less>,
     bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>,
     bmi::ranked_non_unique<bmi::tag<entry_last_used>, bmi::member<cache_entry, time_t, &cache_entry::last_used>>>,
@@ -325,13 +301,11 @@ class owns_lock_visitor : public boost::static_visitor<bool>
 class uc_storage
 {
   protected:
-    size_t m_capacity;
-    std::atomic<size_t> m_used;
-    bip::mapped_region m_region;
-    memory_t m_segment;
-    void_allocator_t m_allocator;
-    std::unique_ptr<lru_cache_t> m_cache;
     mutable bip::interprocess_upgradable_mutex m_cache_mutex;
+    const size_t m_capacity;
+    std::atomic<size_t> m_used;
+    memory_t m_segment;
+    std::unique_ptr<lru_cache_t> m_cache;
 
     // Precondition: Lock held if reference to shared memory.
     size_t
@@ -443,14 +417,12 @@ class uc_storage
     }
 
   public:
-    uc_storage(size_t capacity)
+    uc_storage(memory_t&& segment, size_t capacity)
         : m_cache_mutex()
         , m_capacity(capacity)
-        , m_region(bip::anonymous_shared_memory(capacity * 2))
-        , m_segment(bip::create_only, m_region.get_address(), m_region.get_size())
-        , m_allocator(m_segment.get_segment_manager())
+        , m_segment(std::move(segment))
         , m_used(0)
-        , m_cache(m_segment.construct<lru_cache_t>(bip::anonymous_instance)(lru_cache_t::ctor_args_list(), m_allocator))
+        , m_cache(m_segment.construct<lru_cache_t>("storage")(lru_cache_t::ctor_args_list(), m_segment.get_allocator<cache_entry>()))
     {
     }
 
@@ -603,7 +575,7 @@ class uc_storage
     success_t
     store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration = 0, const bool exclusive = false)
     {
-        cache_entry entry(addr, m_allocator);
+        cache_entry entry(addr, m_segment.get_allocator<char>());
         entry.expiration = expiration;
 
         if (Z_TYPE_P(&val) == IS_LONG) {
@@ -626,7 +598,7 @@ class uc_storage
                 return 0;
             }
 
-            serialized_t s(*strbuf.s, m_allocator);
+            serialized_t s(*strbuf.s, m_segment.get_allocator<char>());
             smart_str_free(&strbuf);
             entry.data = std::move(s);
         }
@@ -641,7 +613,7 @@ class uc_storage
     success_t
     store(const zend_string& addr, const long val, const time_t now)
     {
-        cache_entry entry(addr, m_allocator);
+        cache_entry entry(addr, m_segment.get_allocator<char>());
         entry.data       = val;
         entry.expiration = 0;
         return store(std::move(entry), now);
@@ -660,7 +632,7 @@ class uc_storage
 
         // If there's no value yet, initialize it to the step value.
         if (m_cache->end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, m_allocator);
+            cache_entry entry(addr, m_segment.get_allocator<char>());
             entry.data = step;
             exclusive_lock_t xlock(std::move(ulock));
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
@@ -702,7 +674,7 @@ class uc_storage
 
         // If there's no value there, succeed without comparison.
         if (m_cache->end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, m_allocator);
+            cache_entry entry(addr, m_segment.get_allocator<char>());
             entry.data = next;
             exclusive_lock_t xlock(std::move(ulock));
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
@@ -728,8 +700,17 @@ extern "C" {
 uc_storage_t
 uc_storage_init(const size_t size)
 {
+    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing PHP-UC storage...");
+
+    struct shm_remove
+    {
+        shm_remove() { bip::shared_memory_object::remove("php-uc"); }
+        ~shm_remove(){ bip::shared_memory_object::remove("php-uc"); }
+    } remover;
+
     try {
-        uc_storage* storage_inst = new uc_storage(size);
+       memory_t m_segment(bip::create_only, "php-uc", size);
+       uc_storage* storage_inst = new uc_storage(std::move(m_segment), size);
         return storage_inst;
     } catch (const std::exception& ex) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while initializing interprocess storage: %s", ex.what());
