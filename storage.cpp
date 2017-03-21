@@ -340,47 +340,11 @@ class uc_storage
         return b::apply_visitor(cost_visitor(), entry.data);
     }
 
-    // Precondition: Shared lock or stronger is held.
-    b::optional<lru_cache_by_address_t::iterator>
-    get_iterator(const zend_string& address, const time_t now) const
+    // Precondition: Lock held if reference to shared memory.
+    bool
+    is_fresh(const cache_entry& entry, const time_t now) const
     {
-        auto it = m_cache->get<entry_address>().find(address);
-
-        if (m_cache->end() == it) {
-            return b::none;
-        }
-
-        // An expired item is as good as none.
-        if (now > 0 && it->expiration > 0 && it->expiration < now) {
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Expired: %lu < %lu", it->expiration, now);
-            return b::none;
-        }
-
-        // @TODO: Technically, we should use a wrapper to ensure locking on
-        // iterator dereference, but it's also known to be safe:
-        // "Strictly speaking, iterator dereference should also be
-        // lockguarded, although I can say unofficially that unguarded
-        // dereference is OK." --Joaquín M López Muñoz
-        return it;
-    }
-
-    // Precondition: Shared lock or stronger is held.
-    b::optional<lru_cache_by_address_t::iterator>
-    get_iterator(const address_t& address, const time_t now) const
-    {
-        auto it = m_cache->get<entry_address>().find(address);
-
-        if (m_cache->end() == it) {
-            return b::none;
-        }
-
-        // An expired item is as good as none.
-        if (now > 0 && it->expiration > 0 && it->expiration < now) {
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Expired: %lu < %lu", it->expiration, now);
-            return b::none;
-        }
-
-        return it;
+        return (now == 0 || entry.expiration == 0 || entry.expiration < now);
     }
 
     bool
@@ -467,7 +431,7 @@ class uc_storage
 
     // Returns true if the entry has (or has been made to have) an
     // appropriate last_used rank.
-    // Precondition: No locks held.
+    // Precondition: No lock held.
     bool
     bump_if_necessary(const lru_cache_t::iterator& it)
     {
@@ -523,8 +487,8 @@ class uc_storage
         // upgrade, then it must be done atomically. So, we cannot start with
         // a shared lock.
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it_optional = get_iterator(e.address, now);
-        if (it_optional == b::none) {
+        auto it = m_cache->get<entry_address>().find(e.address);
+        if (m_cache->end() == it || !is_fresh(*it, now)) {
             // We actually have to perform the insertion, so we now wait on
             // shared locks to release.
             exclusive_lock_t xlock(std::move(ulock));
@@ -564,9 +528,8 @@ class uc_storage
     del(const zend_string& addr, const time_t now)
     {
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it_optional = get_iterator(addr, now);
-        if (b::none != it_optional) {
-            auto it = *it_optional;
+        auto it = m_cache->get<entry_address>().find(addr);
+        if (m_cache->end() != it) {
             // Upgrade to an exclusive lock now that we actually need to delete.
             exclusive_lock_t xlock(std::move(ulock));
             m_cache->get<entry_address>().erase(it);
@@ -605,10 +568,11 @@ class uc_storage
 
     // Precondition: No locks held.
     bool
-    contains(const zend_string& address, const time_t now) const
+    contains(const zend_string& addr, const time_t now) const
     {
         shared_lock_t slock(m_cache_mutex);
-        return b::none != get_iterator(address, now);
+        auto it = m_cache->get<entry_address>().find(addr);
+        return (m_cache->end() != it && is_fresh(*it, now));
     }
 
     // Precondition: No locks held.
@@ -617,15 +581,16 @@ class uc_storage
     {
         zval_and_success ret;
         shared_lock_t slock(m_cache_mutex);
-        auto it_optional = get_iterator(addr, now);
 
-        if (b::none != it_optional) {
-            ret.val     = b::apply_visitor(zval_visitor(), (*it_optional)->data);
+        auto it = m_cache->get<entry_address>().find(addr);
+
+        if (m_cache->end() != it && is_fresh(*it, now)) {
+            ret.val     = b::apply_visitor(zval_visitor(), it->data);
             ret.success = true;
 
             // @TODO: Clean up the following.
-            slock.unlock();  // To allow bump_if_necessary to do its thing.
-            bump_if_necessary(*it_optional);
+            slock.unlock();
+            bump_if_necessary(it);
             return ret;
         }
 
@@ -688,13 +653,13 @@ class uc_storage
     {
         zval_and_success ret;
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it_optional = get_iterator(addr, now);
+        auto it = m_cache->get<entry_address>().find(addr);
         b::optional<value_t> next_value;
 
         ret.success = false;
 
         // If there's no value yet, initialize it to the step value.
-        if (b::none == it_optional) {
+        if (m_cache->end() == it || !is_fresh(*it, now)) {
             cache_entry entry(addr, m_allocator);
             entry.data = step;
             exclusive_lock_t xlock(std::move(ulock));
@@ -705,7 +670,6 @@ class uc_storage
             return ret;
         }
 
-        auto it = *it_optional;
         auto bound_visitor    = std::bind(increment_visitor(), std::placeholders::_1, step);
         auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
 
@@ -734,10 +698,10 @@ class uc_storage
     {
         upgradable_lock_t ulock(m_cache_mutex);
 
-        auto it_optional = get_iterator(addr, now);
+        auto it = m_cache->get<entry_address>().find(addr);
 
         // If there's no value there, succeed without comparison.
-        if (b::none == it_optional) {
+        if (m_cache->end() == it || !is_fresh(*it, now)) {
             cache_entry entry(addr, m_allocator);
             entry.data = next;
             exclusive_lock_t xlock(std::move(ulock));
@@ -745,8 +709,6 @@ class uc_storage
             assert(res.second);
             return true;
         }
-
-        auto it = *it_optional;
 
         // If the value doesn't match what's expected (or is the wrong type), fail.
         auto bound_visitor = std::bind(cas_match_visitor(), std::placeholders::_1, expected);
