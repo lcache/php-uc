@@ -75,7 +75,7 @@ for ($i = 0; $i < OPS; $i++) {
         $bytes += $size * 8;
         switch ($backend) {
             case 'uc':
-                uc_add('key' . $key, $value);
+                uc_store('key' . $key, $value);
                 break;
             case 'apcu':
                 apcu_store('key' . $key, $value);

@@ -9,8 +9,8 @@
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
 
-#define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
-#define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
+//#define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
+//#define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
 
 #include <boost/multi_index_container.hpp>
 #include <boost/multi_index/member.hpp>
@@ -577,6 +577,11 @@ class uc_storage
     success_t
     store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration = 0, const bool exclusive = false)
     {
+        //auto segment = m_allocator.get_segment_manager();
+        //bip::unique_ptr<cache_entry> entry = segment->construct<cache_entry>(bip::anonymous_instance)(addr, m_allocator);
+
+        // @TODO: Delay cache_entry construction and, when needed, create it in the shared memory segment.
+
         cache_entry entry(addr, m_allocator);
         entry.expiration = expiration;
 
@@ -735,7 +740,7 @@ uc_storage_init(const size_t size)
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing shared storage of size %lu...", size);
 
     try {
-       memory_t segment(bip::create_only, "uc", size);
+       memory_t segment(bip::create_only, "uc", size * 2);
        uc_storage* storage = segment.construct<uc_storage>("storage")(size, segment.get_segment_manager());
        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initialized storage at %p", storage);
        return true;
