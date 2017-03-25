@@ -6,6 +6,9 @@
 #include <boost/interprocess/sync/sharable_lock.hpp>
 #include <boost/interprocess/sync/upgradable_lock.hpp>
 
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/thread/thread_time.hpp>
+
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
 
@@ -313,7 +316,14 @@ class uc_storage
     bool
     needs_bump(const lru_cache_t::iterator& it) const
     {
-        shared_lock_t lock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(10);
+        shared_lock_t lock(m_cache_mutex, abs_time);
+
+        if (!lock.owns()) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in needs_bump().");
+            return false;
+        }
+
         const auto rank  = m_cache.get<entry_last_used>().find_rank(it->last_used);
         const auto count = m_cache.get<entry_last_used>().size();
 
@@ -341,7 +351,14 @@ class uc_storage
             time_t new_last_used;
         };
 
-        exclusive_lock_t lock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(10);
+        exclusive_lock_t lock(m_cache_mutex, abs_time);
+
+        if (!lock.owns()) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in bump().");
+            return false;
+        }
+
         return m_cache.modify(it, bump_cache_entry_last_used(time(0)));
     }
 
@@ -360,7 +377,12 @@ class uc_storage
             return false;
         }
 
-        exclusive_lock_t lock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        exclusive_lock_t lock(m_cache_mutex, abs_time);
+        if (!lock.owns()) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in free_space().");
+            return false;
+        }
 
         // First, evict everything that can expire and is expired, up to the space needed.
         lru_cache_by_expiration_t::iterator it_l =
@@ -475,7 +497,14 @@ class uc_storage
             return false;
         }
 
-        exclusive_lock_t lock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        exclusive_lock_t lock(m_cache_mutex, abs_time);
+
+        if (!lock.owns()) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in store().");
+            return false;
+        }
+
         std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
 
         // Replace on collision, using the matching entry as the position.
@@ -489,7 +518,14 @@ class uc_storage
     success_t
     del(const zend_string& addr, const time_t now)
     {
-        upgradable_lock_t ulock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        upgradable_lock_t ulock(m_cache_mutex, abs_time);
+
+        if (!ulock.owns()) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in del().");
+            return false;
+        }
+
         auto it = m_cache.get<entry_address>().find(addr);
         if (m_cache.end() != it) {
             // Upgrade to an exclusive lock now that we actually need to delete.
@@ -554,7 +590,15 @@ class uc_storage
     get(const zend_string& addr, const time_t now)
     {
         zval_and_success ret;
-        shared_lock_t slock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        shared_lock_t slock(m_cache_mutex, abs_time);
+
+        if (!slock.owns()) {
+            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in get().");
+            ZVAL_FALSE(&(ret.val));
+            ret.success = false;
+            return ret;
+        }
 
         auto it = m_cache.get<entry_address>().find(addr);
 
