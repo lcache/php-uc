@@ -714,7 +714,7 @@ uc_storage_init(const size_t size)
 
     bip::shared_memory_object::remove("uc");
 
-    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing shared storage...");
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing shared storage of size %lu...", size);
 
     try {
        memory_t segment(bip::create_only, "uc", size);
