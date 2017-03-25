@@ -697,6 +697,24 @@ class uc_storage
     }
 };
 
+bip::offset_ptr<uc_storage> get_storage()
+{
+    static bip::offset_ptr<uc_storage> storage = nullptr;
+
+    if (nullptr == storage) {
+        try {
+            memory_t* segment = new memory_t(bip::open_only, "uc");
+            storage = segment->find<uc_storage>("storage").first;
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Found storage at %p", storage);
+            return storage;
+        } catch (const std::exception& ex) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while connecting to interprocess storage: %s", ex.what());
+        }
+    }
+
+    return storage;
+}
+
 extern "C" {
 
 // Precondition: Before forking.
@@ -738,23 +756,23 @@ uc_storage_get_handle()
         try {
             memory_t* segment = new memory_t(bip::open_only, "uc");
             storage = segment->find<uc_storage>("storage").first;
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Mapped existing storage at %p", storage);
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Found storage at %p", storage);
             return storage;
         } catch (const std::exception& ex) {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while connecting to interprocess storage: %s", ex.what());
         }
     }
 
-
-    return nullptr;
+    return storage;
 }
 
 size_t
 uc_storage_size(uc_storage_t st_opaque)
 {
     //uc_storage* st = static_cast<uc_storage*>(st_opaque);
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    //memory_t* segment = get_segment();
+    //memory_t segment(bip::open_only, "uc");
+    auto st = get_storage();
     try {
         return st->size();
         //return st->lock_and_get_zero();
@@ -768,8 +786,7 @@ uc_storage_size(uc_storage_t st_opaque)
 zval_and_success
 uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const long step, const time_t now)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         return st->increment_or_initialize(*address, step, now);
     } catch (const std::exception& ex) {
@@ -783,8 +800,7 @@ uc_storage_increment(uc_storage_t st_opaque, const zend_string* address, const l
 success_t
 uc_storage_cas(uc_storage_t st_opaque, const zend_string* address, const long next, const long expected, const time_t now)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         return st->cas(*address, next, expected, now);
     } catch (const std::exception& ex) {
@@ -797,8 +813,7 @@ success_t
 uc_storage_store(
   uc_storage_t st_opaque, const zend_string* address, const zval* data, time_t expiration, zend_bool exclusive, const time_t now)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         return st->store(*address, *data, now, expiration, exclusive);
     } catch (const std::exception& ex) {
@@ -810,8 +825,7 @@ uc_storage_store(
 zval_and_success
 uc_storage_get(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         return st->get(*address, now);
     } catch (const std::exception& ex) {
@@ -825,8 +839,7 @@ uc_storage_get(uc_storage_t st_opaque, const zend_string* address, const time_t 
 success_t
 uc_storage_exists(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         return st->contains(*address, now);
     } catch (const std::exception& ex) {
@@ -839,8 +852,7 @@ uc_storage_exists(uc_storage_t st_opaque, const zend_string* address, const time
 success_t
 uc_storage_delete(uc_storage_t st_opaque, const zend_string* address, const time_t now)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         return st->del(*address, now);
     } catch (const std::exception& ex) {
@@ -853,8 +865,7 @@ uc_storage_delete(uc_storage_t st_opaque, const zend_string* address, const time
 void
 uc_storage_clear(uc_storage_t st_opaque)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         st->clear();
     } catch (const std::exception& ex) {
@@ -865,8 +876,7 @@ uc_storage_clear(uc_storage_t st_opaque)
 void
 uc_storage_dump(uc_storage_t st_opaque)
 {
-    memory_t segment(bip::open_only, "uc");
-    bip::offset_ptr<uc_storage> st = segment.find<uc_storage>("storage").first;
+    auto st = get_storage();
     try {
         st->dump();
     } catch (const std::exception& ex) {
