@@ -82,10 +82,10 @@ PHP_MINIT_FUNCTION(uc)
     ZEND_INIT_MODULE_GLOBALS(uc, php_uc_init_globals, NULL);
     REGISTER_INI_ENTRIES();
 
-    int retval;
+    success_t success;
 
-    UC_G(storage) = uc_storage_init(UC_G(size_in_mb) * 1024 * 1024);
-    if (NULL == UC_G(storage)) {
+    success = uc_storage_init(UC_G(size_in_mb) * 1024 * 1024);
+    if (!success) {
         return FAILURE;
     }
 
@@ -109,7 +109,7 @@ PHP_FUNCTION(uc_clear_cache)
     if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
-    uc_storage_clear(UC_G(storage));
+    uc_storage_clear(uc_storage_get_handle());
     RETURN_TRUE;
 }
 /* }}} */
@@ -135,7 +135,7 @@ uc_cache_store(const zend_string* key, const zval* val, const size_t ttl, const 
         expiration = uc_time() + ttl;
     }
 
-    return uc_storage_store(UC_G(storage), key, val, expiration, exclusive, now);
+    return uc_storage_store(uc_storage_get_handle(), key, val, expiration, exclusive, now);
 }
 /* }}} */
 
@@ -237,7 +237,7 @@ PHP_FUNCTION(uc_inc)
         ZVAL_FALSE(success);
     }
 
-    ret = uc_storage_increment(UC_G(storage), key, step, now);
+    ret = uc_storage_increment(uc_storage_get_handle(), key, step, now);
 
     if (success && ret.success) {
         ZVAL_TRUE(success);
@@ -267,7 +267,7 @@ PHP_FUNCTION(uc_dec)
         ZVAL_FALSE(success);
     }
 
-    ret = uc_storage_increment(UC_G(storage), key, -step, now);
+    ret = uc_storage_increment(uc_storage_get_handle(), key, -step, now);
 
     if (success && ret.success) {
         ZVAL_TRUE(success);
@@ -292,7 +292,7 @@ PHP_FUNCTION(uc_cas)
         return;
     }
 
-    success = uc_storage_cas(UC_G(storage), key, vals[1], vals[0], now);
+    success = uc_storage_cas(uc_storage_get_handle(), key, vals[1], vals[0], now);
 
     if (success) {
         RETURN_TRUE;
@@ -305,7 +305,7 @@ PHP_FUNCTION(uc_cas)
 /* {{{ uc_cache_size */
 PHP_FUNCTION(uc_size)
 {
-    size_t size = uc_storage_size(UC_G(storage));
+    size_t size = uc_storage_size(uc_storage_get_handle());
     RETURN_LONG(size);
 }
 /* }}} */
@@ -313,7 +313,7 @@ PHP_FUNCTION(uc_size)
 /* {{{ uc_dump */
 PHP_FUNCTION(uc_dump)
 {
-    uc_storage_dump(UC_G(storage));
+    uc_storage_dump(uc_storage_get_handle());
 }
 /* }}} */
 
@@ -348,7 +348,7 @@ PHP_FUNCTION(uc_fetch)
 
     if (Z_TYPE_P(key) == IS_ARRAY || (Z_TYPE_P(key) == IS_STRING && Z_STRLEN_P(key) > 0)) {
         if (Z_TYPE_P(key) == IS_STRING) {
-            ret = uc_storage_get(UC_G(storage), Z_STR_P(key), now);
+            ret = uc_storage_get(uc_storage_get_handle(), Z_STR_P(key), now);
             if (success && ret.success) {
                 ZVAL_TRUE(success);
             }
@@ -362,7 +362,7 @@ PHP_FUNCTION(uc_fetch)
             zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
             while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
                 if (Z_TYPE_P(hentry) == IS_STRING) {
-                    zval_and_success result_entry = uc_storage_get(UC_G(storage), Z_STR_P(hentry), now);
+                    zval_and_success result_entry = uc_storage_get(uc_storage_get_handle(), Z_STR_P(hentry), now);
                     if (result_entry.success) {
                         add_assoc_zval(&retarray, Z_STRVAL_P(hentry), &(result_entry.val));
                     }
@@ -407,7 +407,7 @@ PHP_FUNCTION(uc_delete)
             RETURN_FALSE;
         }
 
-        if (uc_storage_delete(UC_G(storage), Z_STR_P(keys), now)) {
+        if (uc_storage_delete(uc_storage_get_handle(), Z_STR_P(keys), now)) {
             RETURN_TRUE;
         } else {
             RETURN_FALSE;
@@ -426,7 +426,7 @@ PHP_FUNCTION(uc_delete)
                                  "uc_delete() expects a string, array of strings, or UCIterator instance.");
                 add_next_index_zval(return_value, hentry);
                 Z_ADDREF_P(hentry);
-            } else if (uc_storage_delete(UC_G(storage), Z_STR_P(hentry), now) != 1) {
+            } else if (uc_storage_delete(uc_storage_get_handle(), Z_STR_P(hentry), now) != 1) {
                 add_next_index_zval(return_value, hentry);
                 Z_ADDREF_P(hentry);
             }
@@ -470,7 +470,7 @@ PHP_FUNCTION(uc_exists)
 
     if (Z_TYPE_P(key) == IS_STRING) {
         if (Z_STRLEN_P(key)) {
-            found = uc_storage_exists(UC_G(storage), Z_STR_P(key), t);
+            found = uc_storage_exists(uc_storage_get_handle(), Z_STR_P(key), t);
             if (found) {
                 RETURN_TRUE;
             } else {
@@ -486,7 +486,7 @@ PHP_FUNCTION(uc_exists)
         zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(key), &hpos);
         while ((hentry = zend_hash_get_current_data_ex(Z_ARRVAL_P(key), &hpos))) {
             if (Z_TYPE_P(hentry) == IS_STRING) {
-                found = uc_storage_exists(UC_G(storage), Z_STR_P(hentry), t);
+                found = uc_storage_exists(uc_storage_get_handle(), Z_STR_P(hentry), t);
                 if (found) {
                     add_assoc_bool(return_value, Z_STRVAL_P(hentry), 1);
                 }

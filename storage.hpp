@@ -32,7 +32,10 @@ typedef struct {
     success_t success;
 } zval_and_success;
 
-uc_storage_t uc_storage_init(const size_t size);
+success_t uc_storage_init(const size_t size);
+
+uc_storage_t uc_storage_get_segment();
+
 success_t uc_storage_store(uc_storage_t st_opaque,
                            const zend_string* address,
                            const zval* data,

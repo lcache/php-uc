@@ -28,7 +28,7 @@
 ZEND_BEGIN_MODULE_GLOBALS(uc)
 zend_bool enabled;
 long size_in_mb;
-uc_storage_t storage;
+uc_segment_t storage;
 char* preload_path;
 ZEND_END_MODULE_GLOBALS(uc)
 

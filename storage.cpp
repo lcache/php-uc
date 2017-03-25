@@ -304,8 +304,8 @@ class uc_storage
     mutable bip::interprocess_upgradable_mutex m_cache_mutex;
     const size_t m_capacity;
     std::atomic<size_t> m_used;
-    memory_t m_segment;
-    std::unique_ptr<lru_cache_t> m_cache;
+    void_allocator_t m_allocator;
+    lru_cache_t m_cache;
 
     // Precondition: Lock held if reference to shared memory.
     size_t
@@ -325,8 +325,8 @@ class uc_storage
     needs_bump(const lru_cache_t::iterator& it) const
     {
         shared_lock_t lock(m_cache_mutex);
-        const auto rank  = m_cache->get<entry_last_used>().find_rank(it->last_used);
-        const auto count = m_cache->get<entry_last_used>().size();
+        const auto rank  = m_cache.get<entry_last_used>().find_rank(it->last_used);
+        const auto count = m_cache.get<entry_last_used>().size();
 
         // If the entry is in oldest 25% used.
         return (rank < (count * 0.25));
@@ -353,7 +353,7 @@ class uc_storage
         };
 
         exclusive_lock_t lock(m_cache_mutex);
-        return m_cache->modify(it, bump_cache_entry_last_used(time(0)));
+        return m_cache.modify(it, bump_cache_entry_last_used(time(0)));
     }
 
     // Precondition: No locks held.
@@ -375,11 +375,11 @@ class uc_storage
 
         // First, evict everything that can expire and is expired, up to the space needed.
         lru_cache_by_expiration_t::iterator it_l =
-          m_cache->get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
-        lru_cache_by_expiration_t::iterator it_u = m_cache->get<entry_expiration>().upper_bound(now);
+          m_cache.get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
+        lru_cache_by_expiration_t::iterator it_u = m_cache.get<entry_expiration>().upper_bound(now);
         for (auto i = it_l; i != it_u; ++i) {
             m_used -= get_cost(*i);
-            m_cache->get<entry_expiration>().erase(i);
+            m_cache.get<entry_expiration>().erase(i);
         }
 
         // See if we have enough space yet.
@@ -388,9 +388,9 @@ class uc_storage
         }
 
         // If we still need more space, evict the least recently used items.
-        for (auto i = m_cache->get<entry_last_used>().begin(); i != m_cache->get<entry_last_used>().end(); ++i) {
+        for (auto i = m_cache.get<entry_last_used>().begin(); i != m_cache.get<entry_last_used>().end(); ++i) {
             m_used -= get_cost(*i);
-            m_cache->get<entry_last_used>().erase(i);
+            m_cache.get<entry_last_used>().erase(i);
 
             // Stop evicting once we have enough space.
             if (m_capacity - m_used >= space_needed) {
@@ -417,17 +417,19 @@ class uc_storage
     }
 
   public:
-    uc_storage(memory_t&& segment, size_t capacity)
+    uc_storage(size_t capacity, void_allocator_t&& allocator)
         : m_cache_mutex()
         , m_capacity(capacity)
-        , m_segment(std::move(segment))
+        , m_allocator(std::move(allocator))
         , m_used(0)
-        , m_cache(m_segment.construct<lru_cache_t>("storage")(lru_cache_t::ctor_args_list(), m_segment.get_allocator<cache_entry>()))
+        , m_cache(lru_cache_t::ctor_args_list(), m_allocator)
     {
+        std::cerr << "Storage has been initialized." << std::endl;
     }
 
     ~uc_storage()
     {
+        std::cerr << "Storage is being destroyed." << std::endl;
     }
 
     // Precondition: No locks held.
@@ -442,7 +444,7 @@ class uc_storage
     clear()
     {
         exclusive_lock_t lock(m_cache_mutex);
-        m_cache->clear();
+        m_cache.clear();
     }
 
     // Precondition: No locks held.
@@ -459,15 +461,15 @@ class uc_storage
         // upgrade, then it must be done atomically. So, we cannot start with
         // a shared lock.
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it = m_cache->get<entry_address>().find(e.address);
-        if (m_cache->end() == it || !is_fresh(*it, now)) {
+        auto it = m_cache.get<entry_address>().find(e.address);
+        if (m_cache.end() == it || !is_fresh(*it, now)) {
             // We actually have to perform the insertion, so we now wait on
             // shared locks to release.
             exclusive_lock_t xlock(std::move(ulock));
 
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
 
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
 
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
 
@@ -486,11 +488,11 @@ class uc_storage
         }
 
         exclusive_lock_t lock(m_cache_mutex);
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(e));
+        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
 
         // Replace on collision, using the matching entry as the position.
         if (!res.second) {
-            res.second = m_cache->get<entry_address>().replace(res.first, std::move(e));
+            res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
         }
         return res.second;
     }
@@ -500,11 +502,11 @@ class uc_storage
     del(const zend_string& addr, const time_t now)
     {
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it = m_cache->get<entry_address>().find(addr);
-        if (m_cache->end() != it) {
+        auto it = m_cache.get<entry_address>().find(addr);
+        if (m_cache.end() != it) {
             // Upgrade to an exclusive lock now that we actually need to delete.
             exclusive_lock_t xlock(std::move(ulock));
-            m_cache->get<entry_address>().erase(it);
+            m_cache.get<entry_address>().erase(it);
             return true;
         }
         return false;
@@ -515,7 +517,7 @@ class uc_storage
     empty() const
     {
         shared_lock_t lock(m_cache_mutex);
-        return m_cache->empty();
+        return m_cache.empty();
     }
 
     // Precondition: No locks held.
@@ -523,7 +525,7 @@ class uc_storage
     size() const
     {
         shared_lock_t lock(m_cache_mutex);
-        return m_cache->size();
+        return m_cache.size();
     }
 
     // Precondition: No locks held.
@@ -531,7 +533,7 @@ class uc_storage
     dump() const
     {
         shared_lock_t lock(m_cache_mutex);
-        for (auto i = m_cache->begin(); i != m_cache->end(); ++i) {
+        for (auto i = m_cache.begin(); i != m_cache.end(); ++i) {
             std::cout << i->address << "=" << i->data << std::endl;
             // std::string k(i->address.begin(), i->address.end());
             // std::string v(i->serialized.begin(), i->serialized.end());
@@ -543,8 +545,8 @@ class uc_storage
     contains(const zend_string& addr, const time_t now) const
     {
         shared_lock_t slock(m_cache_mutex);
-        auto it = m_cache->get<entry_address>().find(addr);
-        return (m_cache->end() != it && is_fresh(*it, now));
+        auto it = m_cache.get<entry_address>().find(addr);
+        return (m_cache.end() != it && is_fresh(*it, now));
     }
 
     // Precondition: No locks held.
@@ -554,9 +556,9 @@ class uc_storage
         zval_and_success ret;
         shared_lock_t slock(m_cache_mutex);
 
-        auto it = m_cache->get<entry_address>().find(addr);
+        auto it = m_cache.get<entry_address>().find(addr);
 
-        if (m_cache->end() != it && is_fresh(*it, now)) {
+        if (m_cache.end() != it && is_fresh(*it, now)) {
             ret.val     = b::apply_visitor(zval_visitor(), it->data);
             ret.success = true;
 
@@ -575,7 +577,7 @@ class uc_storage
     success_t
     store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration = 0, const bool exclusive = false)
     {
-        cache_entry entry(addr, m_segment.get_allocator<char>());
+        cache_entry entry(addr, m_allocator);
         entry.expiration = expiration;
 
         if (Z_TYPE_P(&val) == IS_LONG) {
@@ -598,7 +600,7 @@ class uc_storage
                 return 0;
             }
 
-            serialized_t s(*strbuf.s, m_segment.get_allocator<char>());
+            serialized_t s(*strbuf.s, m_allocator);
             smart_str_free(&strbuf);
             entry.data = std::move(s);
         }
@@ -613,7 +615,7 @@ class uc_storage
     success_t
     store(const zend_string& addr, const long val, const time_t now)
     {
-        cache_entry entry(addr, m_segment.get_allocator<char>());
+        cache_entry entry(addr, m_allocator);
         entry.data       = val;
         entry.expiration = 0;
         return store(std::move(entry), now);
@@ -625,17 +627,17 @@ class uc_storage
     {
         zval_and_success ret;
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it = m_cache->get<entry_address>().find(addr);
+        auto it = m_cache.get<entry_address>().find(addr);
         b::optional<value_t> next_value;
 
         ret.success = false;
 
         // If there's no value yet, initialize it to the step value.
-        if (m_cache->end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, m_segment.get_allocator<char>());
+        if (m_cache.end() == it || !is_fresh(*it, now)) {
+            cache_entry entry(addr, m_allocator);
             entry.data = step;
             exclusive_lock_t xlock(std::move(ulock));
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
             assert(res.second);  // Insertion should always succeed because of the iterator lookup.
             ZVAL_LONG(&ret.val, step);
             ret.success = true;
@@ -650,7 +652,7 @@ class uc_storage
         if (b::none != next_value_maybe) {
             value_t next_value = *next_value_maybe;
             exclusive_lock_t xlock(std::move(ulock));
-            m_cache->modify(it, set_entry_value(next_value));
+            m_cache.modify(it, set_entry_value(next_value));
             ret.val     = b::apply_visitor(zval_visitor(), next_value);
             ret.success = true;
 
@@ -670,14 +672,14 @@ class uc_storage
     {
         upgradable_lock_t ulock(m_cache_mutex);
 
-        auto it = m_cache->get<entry_address>().find(addr);
+        auto it = m_cache.get<entry_address>().find(addr);
 
         // If there's no value there, succeed without comparison.
-        if (m_cache->end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, m_segment.get_allocator<char>());
+        if (m_cache.end() == it || !is_fresh(*it, now)) {
+            cache_entry entry(addr, m_allocator);
             entry.data = next;
             exclusive_lock_t xlock(std::move(ulock));
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache->get<entry_address>().insert(std::move(entry));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
             assert(res.second);
             return true;
         }
@@ -690,31 +692,60 @@ class uc_storage
 
         // Store the new value.
         exclusive_lock_t xlock(std::move(ulock));
-        m_cache->modify(it, set_entry_value(next));
+        m_cache.modify(it, set_entry_value(next));
         return true;
     }
 };
 
 extern "C" {
 
-uc_storage_t
+// Precondition: Before forking.
+success_t
 uc_storage_init(const size_t size)
 {
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing PHP-UC storage...");
 
-    struct shm_remove
-    {
-        shm_remove() { bip::shared_memory_object::remove("php-uc"); }
-        ~shm_remove(){ bip::shared_memory_object::remove("php-uc"); }
-    } remover;
+    //struct shm_remove
+    //{
+    //    shm_remove() { bip::shared_memory_object::remove("php-uc"); }
+    //    ~shm_remove(){ bip::shared_memory_object::remove("php-uc"); }
+    //} remover;
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Removing existing shared storage...");
+
+    bip::shared_memory_object::remove("uc");
+
+    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing shared storage...");
 
     try {
-       memory_t m_segment(bip::create_only, "php-uc", size);
-       uc_storage* storage_inst = new uc_storage(std::move(m_segment), size);
-        return storage_inst;
+       memory_t segment(bip::create_only, "uc", size);
+       uc_storage* storage = segment.construct<uc_storage>("storage")(size, segment.get_segment_manager());
+       php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initialized storage at %p", storage);
+       return true;
     } catch (const std::exception& ex) {
-        php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while initializing interprocess storage: %s", ex.what());
+       php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while initializing interprocess storage: %s", ex.what());
     }
+
+    return false;
+}
+
+// Precondition: After forking (if forking)
+uc_storage_t
+uc_storage_get_handle()
+{
+    static uc_storage* storage = nullptr;
+
+    if (nullptr == storage) {
+        try {
+            memory_t segment(bip::open_only, "uc");
+            storage = segment.find<uc_storage>("storage").first;
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Mapped existing storage at %p", storage);
+            return storage;
+        } catch (const std::exception& ex) {
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while connecting to interprocess storage: %s", ex.what());
+        }
+    }
+
+
     return nullptr;
 }
 
