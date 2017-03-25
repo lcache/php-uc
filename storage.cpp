@@ -750,20 +750,7 @@ uc_storage_init(const size_t size)
 uc_storage_t
 uc_storage_get_handle()
 {
-    static uc_storage* storage = nullptr;
-
-    if (nullptr == storage) {
-        try {
-            memory_t* segment = new memory_t(bip::open_only, "uc");
-            storage = segment->find<uc_storage>("storage").first;
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Found storage at %p", storage);
-            return storage;
-        } catch (const std::exception& ex) {
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while connecting to interprocess storage: %s", ex.what());
-        }
-    }
-
-    return storage;
+    return nullptr;
 }
 
 size_t
