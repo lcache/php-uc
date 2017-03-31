@@ -12,6 +12,7 @@
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
 
+// "Safe mode" enables internal locks that break in interprocess memory.
 //#define BOOST_MULTI_INDEX_ENABLE_SAFE_MODE
 //#define BOOST_MULTI_INDEX_ENABLE_INVARIANT_CHECKING
 
@@ -33,6 +34,7 @@ extern "C" {
 #include "ext/standard/php_var.h"
 #include "php.h"
 #include "zend_smart_str.h"
+#include <syslog.h>
 }
 
 #include "storage.hpp"
@@ -105,18 +107,21 @@ struct address_less {
     bool
     operator()(const address_t& s0, const address_t& s1) const
     {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: Same");
         return s0 < s1;
     }
 
     bool
     operator()(const zend_string& s0, const address_t& s1) const
     {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: zend_string s0");
         return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) < 0;
     }
 
     bool
     operator()(const address_t& s0, const zend_string& s1) const
     {
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: zend_string s1");
         return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) < 0;
     }
 };
@@ -124,7 +129,7 @@ struct address_less {
 typedef b::multi_index_container<
   cache_entry,
   bmi::indexed_by<
-    bmi::ordered_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_less>,
+    bmi::ordered_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address> /*, address_less */>,
     bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>,
     bmi::ranked_non_unique<bmi::tag<entry_last_used>, bmi::member<cache_entry, time_t, &cache_entry::last_used>>>,
   cache_entry_allocator_t>
@@ -313,17 +318,10 @@ class uc_storage
         return (now == 0 || entry.expiration == 0 || entry.expiration < now);
     }
 
+    // Precondition: Shared lock held.
     bool
     needs_bump(const lru_cache_t::iterator& it) const
     {
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(10);
-        shared_lock_t lock(m_cache_mutex, abs_time);
-
-        if (!lock.owns()) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in needs_bump().");
-            return false;
-        }
-
         const auto rank  = m_cache.get<entry_last_used>().find_rank(it->last_used);
         const auto count = m_cache.get<entry_last_used>().size();
 
@@ -331,7 +329,7 @@ class uc_storage
         return (rank < (count * 0.25));
     }
 
-    // Precondition: No locks held.
+    // Precondition: Exclusive lock held
     bool
     bump(const lru_cache_t::iterator& it)
     {
@@ -350,14 +348,6 @@ class uc_storage
           private:
             time_t new_last_used;
         };
-
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(10);
-        exclusive_lock_t lock(m_cache_mutex, abs_time);
-
-        if (!lock.owns()) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in bump().");
-            return false;
-        }
 
         return m_cache.modify(it, bump_cache_entry_last_used(time(0)));
     }
@@ -379,8 +369,9 @@ class uc_storage
 
         auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
         exclusive_lock_t lock(m_cache_mutex, abs_time);
-        if (!lock.owns()) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in free_space().");
+        if (!lock) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "free_space: Timeout");
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in free_space().");
             return false;
         }
 
@@ -414,19 +405,6 @@ class uc_storage
         return false;
     }
 
-    // Returns true if the entry has (or has been made to have) an
-    // appropriate last_used rank.
-    // Precondition: No lock held.
-    bool
-    bump_if_necessary(const lru_cache_t::iterator& it)
-    {
-        const bool needs_a_bump = needs_bump(it);
-        if (needs_a_bump) {
-            return bump(it);
-        }
-        return true;
-    }
-
   public:
     uc_storage(size_t capacity, const void_allocator_t& allocator)
         : m_capacity(capacity)
@@ -450,11 +428,20 @@ class uc_storage
     }
 
     // Precondition: No locks held.
-    void
+    bool
     clear()
     {
-        exclusive_lock_t lock(m_cache_mutex);
+        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        exclusive_lock_t lock(m_cache_mutex, abs_time);
+
+        if (!lock) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "clear: Timeout");
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in clear().");
+            return false;
+        }
+
         m_cache.clear();
+        return true;
     }
 
     // Precondition: No locks held.
@@ -479,7 +466,8 @@ class uc_storage
 
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
 
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+            //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
 
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
 
@@ -500,16 +488,19 @@ class uc_storage
         auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
         exclusive_lock_t lock(m_cache_mutex, abs_time);
 
-        if (!lock.owns()) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in store().");
+        if (!lock) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "store: Timeout");
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in store().");
             return false;
         }
 
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+        //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
 
         // Replace on collision, using the matching entry as the position.
         if (!res.second) {
-            res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
+            //res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
+            res.second = m_cache.get<entry_address>().replace(res.first, e);
         }
         return res.second;
     }
@@ -518,35 +509,53 @@ class uc_storage
     success_t
     del(const zend_string& addr, const time_t now)
     {
+        //std::cerr << "Deletion: ULock" << std::endl << std::flush;
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: ULock");
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock for %p", this);
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: ULock");
         auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        upgradable_lock_t ulock(m_cache_mutex, abs_time);
+        //upgradable_lock_t ulock(m_cache_mutex, abs_time);
+        exclusive_lock_t xlock(m_cache_mutex, abs_time);
 
-        if (!ulock.owns()) {
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in del().");
+        if (!xlock) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "del: Timeout");
+            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in del().");
             return false;
         }
 
-        auto it = m_cache.get<entry_address>().find(addr);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Owns? %d", xlock.owns());
+
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Lookup");
+        //std::cerr << "Deletion: Lookup" << std::endl << std::flush;
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deltion: Lookup");
+        //auto idx = m_cache.get<entry_address>();
+
+        address_t a(addr, m_allocator); // @TODO: Need this versus addr lookup?
+
+        auto& idx = m_cache.get<entry_address>();
+        auto it = idx.find(a);
         if (m_cache.end() != it) {
+            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock");
+            //std::cerr << "Deletion: XLock" << std::endl << std::flush;
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: XLock");
             // Upgrade to an exclusive lock now that we actually need to delete.
-            exclusive_lock_t xlock(std::move(ulock));
-            m_cache.get<entry_address>().erase(it);
+            //exclusive_lock_t xlock(std::move(ulock));
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Erase");
+            //std::cerr << "Deletion: Erase" << std::endl << std::flush;
+
+            //address_t a(addr, m_allocator);
+
+            idx.erase(it);  // @TODO: Try with iterator?
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Done");
+            //std::cerr << "Deletion: Done" << std::endl << std::flush;
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: Done.");
             return true;
         }
+
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Not Found");
+
         return false;
     }
-
-    size_t get_zero()
-    {
-        return 0;
-    }
-
-    size_t lock_and_get_zero()
-    {
-        bip::sharable_lock<bip::interprocess_upgradable_mutex> lock(m_cache_mutex);
-        return 0;
-    }
-
 
     // Precondition: No locks held.
     bool
@@ -581,7 +590,9 @@ class uc_storage
     contains(const zend_string& addr, const time_t now) const
     {
         shared_lock_t slock(m_cache_mutex);
-        auto it = m_cache.get<entry_address>().find(addr);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Contains: Lookup");
+        address_t a(addr, m_allocator);
+        auto it = m_cache.get<entry_address>().find(a);
         return (m_cache.end() != it && is_fresh(*it, now));
     }
 
@@ -592,23 +603,33 @@ class uc_storage
         zval_and_success ret;
         auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
         shared_lock_t slock(m_cache_mutex, abs_time);
+        //exclusive_lock_t xlock(m_cache_mutex, abs_time);
 
         if (!slock.owns()) {
+            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "get: Timeout");
             php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in get().");
             ZVAL_FALSE(&(ret.val));
             ret.success = false;
             return ret;
         }
 
-        auto it = m_cache.get<entry_address>().find(addr);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Get: Lookup");
+        address_t a(addr, m_allocator);
+        auto it = m_cache.get<entry_address>().find(a);
 
         if (m_cache.end() != it && is_fresh(*it, now)) {
             ret.val     = b::apply_visitor(zval_visitor(), it->data);
             ret.success = true;
 
-            // @TODO: Clean up the following.
-            slock.unlock();
-            bump_if_necessary(it);
+            if (needs_bump(it)) {
+                // Bumping in the LRU is best-effort. This conversion will only
+                // succeed if other shared locks aren't held.
+                exclusive_lock_t xlock(std::move(slock), bip::try_to_lock);
+                if (xlock) {
+                    bump(it);
+                }
+            }
+
             return ret;
         }
 
@@ -651,7 +672,8 @@ class uc_storage
 
             serialized_t s(*strbuf.s, m_allocator);
             smart_str_free(&strbuf);
-            entry.data = std::move(s);
+            //entry.data = std::move(s);
+            entry.data = s;
         }
 
         if (exclusive) {
@@ -676,7 +698,9 @@ class uc_storage
     {
         zval_and_success ret;
         upgradable_lock_t ulock(m_cache_mutex);
-        auto it = m_cache.get<entry_address>().find(addr);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
+        address_t a(addr, m_allocator);
+        auto it = m_cache.get<entry_address>().find(a);
         b::optional<value_t> next_value;
 
         ret.success = false;
@@ -705,9 +729,10 @@ class uc_storage
             ret.val     = b::apply_visitor(zval_visitor(), next_value);
             ret.success = true;
 
-            // @TODO: Clean up the following.
-            xlock.unlock();  // To allow bump_if_necessary to do its thing.
-            bump_if_necessary(it);
+            if (needs_bump(it)) {
+                bump(it);
+            }
+
             return ret;
         }
 
@@ -721,7 +746,9 @@ class uc_storage
     {
         upgradable_lock_t ulock(m_cache_mutex);
 
-        auto it = m_cache.get<entry_address>().find(addr);
+        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
+        address_t a(addr, m_allocator);
+        auto it = m_cache.get<entry_address>().find(a);
 
         // If there's no value there, succeed without comparison.
         if (m_cache.end() == it || !is_fresh(*it, now)) {
