@@ -129,7 +129,7 @@ struct address_less {
 typedef b::multi_index_container<
   cache_entry,
   bmi::indexed_by<
-    bmi::ordered_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address> /*, address_less */>,
+    bmi::ordered_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_less>,
     bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>,
     bmi::ranked_non_unique<bmi::tag<entry_last_used>, bmi::member<cache_entry, time_t, &cache_entry::last_used>>>,
   cache_entry_allocator_t>
@@ -530,10 +530,10 @@ class uc_storage
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deltion: Lookup");
         //auto idx = m_cache.get<entry_address>();
 
-        address_t a(addr, m_allocator); // @TODO: Need this versus addr lookup?
+        //address_t a(addr, m_allocator); // @TODO: Need this versus addr lookup?
 
         auto& idx = m_cache.get<entry_address>();
-        auto it = idx.find(a);
+        auto it = idx.find(addr);
         if (m_cache.end() != it) {
             //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock");
             //std::cerr << "Deletion: XLock" << std::endl << std::flush;
@@ -545,7 +545,7 @@ class uc_storage
 
             //address_t a(addr, m_allocator);
 
-            idx.erase(it);  // @TODO: Try with iterator?
+            idx.erase(it);
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Done");
             //std::cerr << "Deletion: Done" << std::endl << std::flush;
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: Done.");
@@ -591,8 +591,7 @@ class uc_storage
     {
         shared_lock_t slock(m_cache_mutex);
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Contains: Lookup");
-        address_t a(addr, m_allocator);
-        auto it = m_cache.get<entry_address>().find(a);
+        auto it = m_cache.get<entry_address>().find(addr);
         return (m_cache.end() != it && is_fresh(*it, now));
     }
 
@@ -614,8 +613,7 @@ class uc_storage
         }
 
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Get: Lookup");
-        address_t a(addr, m_allocator);
-        auto it = m_cache.get<entry_address>().find(a);
+        auto it = m_cache.get<entry_address>().find(addr);
 
         if (m_cache.end() != it && is_fresh(*it, now)) {
             ret.val     = b::apply_visitor(zval_visitor(), it->data);
@@ -699,8 +697,7 @@ class uc_storage
         zval_and_success ret;
         upgradable_lock_t ulock(m_cache_mutex);
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
-        address_t a(addr, m_allocator);
-        auto it = m_cache.get<entry_address>().find(a);
+        auto it = m_cache.get<entry_address>().find(addr);
         b::optional<value_t> next_value;
 
         ret.success = false;
@@ -747,8 +744,7 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
 
         syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
-        address_t a(addr, m_allocator);
-        auto it = m_cache.get<entry_address>().find(a);
+        auto it = m_cache.get<entry_address>().find(addr);
 
         // If there's no value there, succeed without comparison.
         if (m_cache.end() == it || !is_fresh(*it, now)) {
