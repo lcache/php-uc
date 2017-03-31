@@ -107,21 +107,21 @@ struct address_less {
     bool
     operator()(const address_t& s0, const address_t& s1) const
     {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: Same");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: Same");
         return s0 < s1;
     }
 
     bool
     operator()(const zend_string& s0, const address_t& s1) const
     {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: zend_string s0");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: zend_string s0");
         return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) < 0;
     }
 
     bool
     operator()(const address_t& s0, const zend_string& s1) const
     {
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: zend_string s1");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "address_less: zend_string s1");
         return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) < 0;
     }
 };
@@ -466,8 +466,8 @@ class uc_storage
 
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
 
-            //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+            //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
 
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
 
@@ -494,8 +494,8 @@ class uc_storage
             return false;
         }
 
-        //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
+        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+        //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
 
         // Replace on collision, using the matching entry as the position.
         if (!res.second) {
@@ -511,21 +511,21 @@ class uc_storage
     {
         //std::cerr << "Deletion: ULock" << std::endl << std::flush;
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: ULock");
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock for %p", this);
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock for %p", this);
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: ULock");
         auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        //upgradable_lock_t ulock(m_cache_mutex, abs_time);
-        exclusive_lock_t xlock(m_cache_mutex, abs_time);
+        upgradable_lock_t ulock(m_cache_mutex, abs_time);
+        //exclusive_lock_t xlock(m_cache_mutex, abs_time);
 
-        if (!xlock) {
+        if (!ulock) {
             syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "del: Timeout");
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in del().");
             return false;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Owns? %d", xlock.owns());
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Owns? %d", xlock.owns());
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Lookup");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Lookup");
         //std::cerr << "Deletion: Lookup" << std::endl << std::flush;
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deltion: Lookup");
         //auto idx = m_cache.get<entry_address>();
@@ -540,19 +540,19 @@ class uc_storage
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: XLock");
             // Upgrade to an exclusive lock now that we actually need to delete.
             //exclusive_lock_t xlock(std::move(ulock));
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Erase");
+            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Erase");
             //std::cerr << "Deletion: Erase" << std::endl << std::flush;
 
             //address_t a(addr, m_allocator);
 
             idx.erase(it);
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Done");
+            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Done");
             //std::cerr << "Deletion: Done" << std::endl << std::flush;
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: Done.");
             return true;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Not Found");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Not Found");
 
         return false;
     }
@@ -590,7 +590,7 @@ class uc_storage
     contains(const zend_string& addr, const time_t now) const
     {
         shared_lock_t slock(m_cache_mutex);
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Contains: Lookup");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Contains: Lookup");
         auto it = m_cache.get<entry_address>().find(addr);
         return (m_cache.end() != it && is_fresh(*it, now));
     }
@@ -612,7 +612,7 @@ class uc_storage
             return ret;
         }
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Get: Lookup");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Get: Lookup");
         auto it = m_cache.get<entry_address>().find(addr);
 
         if (m_cache.end() != it && is_fresh(*it, now)) {
@@ -696,7 +696,7 @@ class uc_storage
     {
         zval_and_success ret;
         upgradable_lock_t ulock(m_cache_mutex);
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
         auto it = m_cache.get<entry_address>().find(addr);
         b::optional<value_t> next_value;
 
@@ -743,7 +743,7 @@ class uc_storage
     {
         upgradable_lock_t ulock(m_cache_mutex);
 
-        syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
+        //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
         auto it = m_cache.get<entry_address>().find(addr);
 
         // If there's no value there, succeed without comparison.
