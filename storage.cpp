@@ -446,7 +446,7 @@ class uc_storage
 
     // Precondition: No locks held.
     success_t
-    store_exclusive(cache_entry&& e, const time_t now)
+    store_exclusive(cache_entry e, const time_t now)
     {
         bool success = free_space(get_cost(e), now);
         if (!success) {
@@ -478,7 +478,7 @@ class uc_storage
 
     // Precondition: No locks held.
     success_t
-    store(cache_entry&& e, const time_t now)
+    store(cache_entry e, const time_t now)
     {
         bool success = free_space(get_cost(e), now);
         if (!success) {
@@ -499,8 +499,8 @@ class uc_storage
 
         // Replace on collision, using the matching entry as the position.
         if (!res.second) {
-            //res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
-            res.second = m_cache.get<entry_address>().replace(res.first, e);
+            res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
+            //res.second = m_cache.get<entry_address>().replace(res.first, e);
         }
         return res.second;
     }
@@ -670,8 +670,7 @@ class uc_storage
 
             serialized_t s(*strbuf.s, m_allocator);
             smart_str_free(&strbuf);
-            //entry.data = std::move(s);
-            entry.data = s;
+            entry.data = std::move(s);
         }
 
         if (exclusive) {
