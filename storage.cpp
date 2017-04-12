@@ -20,6 +20,7 @@
 #include <boost/multi_index/member.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/ranked_index.hpp>
+#include <boost/multi_index/hashed_index.hpp>
 
 #include <atomic>
 #include <iostream>
@@ -126,10 +127,42 @@ struct address_less {
     }
 };
 
+struct address_equal {
+    bool
+    operator()(const address_t& s0, const address_t& s1) const
+    {
+        return s0 == s1;
+    }
+
+    bool
+    operator()(const zend_string& s0, const address_t& s1) const
+    {
+        return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) == 0;
+    }
+
+    bool
+    operator()(const address_t& s0, const zend_string& s1) const
+    {
+        return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) == 0;
+    }
+};
+
+struct address_hash {
+    std::size_t operator()(const address_t& s0) const
+    {
+        return boost::hash_range(s0.c_str(), s0.c_str() + s0.size());
+    }
+
+    std::size_t operator()(const zend_string& s0) const
+    {
+        return boost::hash_range(ZSTR_VAL(&s0), ZSTR_VAL(&s0) + ZSTR_LEN(&s0));
+    }
+};
+
 typedef b::multi_index_container<
   cache_entry,
   bmi::indexed_by<
-    bmi::ordered_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_less>,
+    bmi::hashed_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_hash, address_equal>,
     bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>,
     bmi::ranked_non_unique<bmi::tag<entry_last_used>, bmi::member<cache_entry, time_t, &cache_entry::last_used>>>,
   cache_entry_allocator_t>
