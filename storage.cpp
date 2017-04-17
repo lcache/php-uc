@@ -479,8 +479,11 @@ class uc_storage
 
     // Precondition: No locks held.
     success_t
-    store_exclusive(cache_entry e, const time_t now)
+    store_exclusive(const zend_string& addr, value_t v, const time_t now)
     {
+        cache_entry e(addr, m_allocator);
+        e.data = std::move(v);
+
         bool success = free_space(get_cost(e), now);
         if (!success) {
             return false;
@@ -511,8 +514,12 @@ class uc_storage
 
     // Precondition: No locks held.
     success_t
-    store(cache_entry e, const time_t now)
+    store(const zend_string& addr, value_t v, const time_t now, const time_t expiration = 0)
     {
+        cache_entry e(addr, m_allocator);
+        e.data = std::move(v);
+        e.expiration = expiration;
+
         bool success = free_space(get_cost(e), now);
         if (!success) {
             return false;
@@ -676,13 +683,10 @@ class uc_storage
         //auto segment = m_allocator.get_segment_manager();
         //bip::unique_ptr<cache_entry> entry = segment->construct<cache_entry>(bip::anonymous_instance)(addr, m_allocator);
 
-        // @TODO: Delay cache_entry construction and, when needed, create it in the shared memory segment.
-
-        cache_entry entry(addr, m_allocator);
-        entry.expiration = expiration;
+        value_t data;
 
         if (Z_TYPE_P(&val) == IS_LONG) {
-            entry.data = Z_LVAL(val);
+            data = Z_LVAL(val);
         } else {
             smart_str strbuf = { 0 };
             php_serialize_data_t var_hash;
@@ -703,23 +707,21 @@ class uc_storage
 
             serialized_t s(*strbuf.s, m_allocator);
             smart_str_free(&strbuf);
-            entry.data = std::move(s);
+            data = std::move(s);
         }
 
         if (exclusive) {
-            return store_exclusive(std::move(entry), now);
+            return store_exclusive(addr, std::move(data), now);
         }
-        return store(std::move(entry), now);
+        return store(addr, std::move(data), now, expiration);
     }
 
     // Precondition: No locks held.
     success_t
     store(const zend_string& addr, const long val, const time_t now)
     {
-        cache_entry entry(addr, m_allocator);
-        entry.data       = val;
-        entry.expiration = 0;
-        return store(std::move(entry), now);
+        value_t data = val;
+        return store(addr, std::move(data), now);
     }
 
     // Precondition: No locks held.
