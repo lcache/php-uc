@@ -518,14 +518,14 @@ class uc_storage
             return false;
         }
 
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        exclusive_lock_t lock(m_cache_mutex, abs_time);
+        //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        exclusive_lock_t lock(m_cache_mutex /*, abs_time*/);
 
-        if (!lock) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "store: Timeout");
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in store().");
-            return false;
-        }
+        //if (!lock) {
+        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "store: Timeout");
+        //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in store().");
+        //    return false;
+        //}
 
         std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
         //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
@@ -682,7 +682,7 @@ class uc_storage
         entry.expiration = expiration;
 
         if (Z_TYPE_P(&val) == IS_LONG) {
-            entry.data = Z_LVAL_P(&val);
+            entry.data = Z_LVAL(val);
         } else {
             smart_str strbuf = { 0 };
             php_serialize_data_t var_hash;
