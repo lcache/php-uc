@@ -1,15 +1,12 @@
 PHP_ARG_ENABLE(uc, whether to enable User Cache support,
 [  --enable-uc           Enable User Cache support])
 
-PHP_ARG_WITH(rocksdb, path to RocksDB for User Cache,
-[  --with-rocksdb=DIR    Directory with static build of RocksDB])
-
 if test "$PHP_UC" != "no"; then
   AC_DEFINE(UC, 1, [ ])
 
   dnl Enable support for C++
-  CXX_FLAGS="-std=c++14 -DDEBUG -g"
-  CXXFLAGS="-std=c++14 -DDEBUG -g"
+  CXX_FLAGS="-std=c++14 -Wall -DDEBUG -g"
+  CXXFLAGS="-std=c++14 -Wall -DDEBUG -g"
   AC_LANG_CPLUSPLUS
   PHP_REQUIRE_CXX()
 

@@ -441,8 +441,8 @@ class uc_storage
   public:
     uc_storage(size_t capacity, const void_allocator_t& allocator)
         : m_capacity(capacity)
-        , m_allocator(allocator)
         , m_used(0)
+        , m_allocator(allocator)
         , m_cache(lru_cache_t::ctor_args_list(), allocator)
     {
         //std::cerr << "Storage has been initialized." << std::endl;
@@ -739,8 +739,12 @@ class uc_storage
             cache_entry entry(addr, m_allocator);
             entry.data = step;
             exclusive_lock_t xlock(std::move(ulock));
+            #ifdef _DEBUG_
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
             assert(res.second);  // Insertion should always succeed because of the iterator lookup.
+            #else
+            m_cache.get<entry_address>().insert(std::move(entry));
+            #endif
             ZVAL_LONG(&ret.val, step);
             ret.success = true;
             return ret;
@@ -783,8 +787,12 @@ class uc_storage
             cache_entry entry(addr, m_allocator);
             entry.data = next;
             exclusive_lock_t xlock(std::move(ulock));
+            #ifdef _DEBUG_
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
             assert(res.second);
+            #else
+            m_cache.get<entry_address>().insert(std::move(entry));
+            #endif
             return true;
         }
 
@@ -840,7 +848,7 @@ uc_storage_init(const size_t size)
 
     try {
        memory_t segment(bip::create_only, "uc", size * 2);
-       uc_storage* storage = segment.construct<uc_storage>("storage")(size, segment.get_segment_manager());
+       /*uc_storage* storage = */segment.construct<uc_storage>("storage")(size, segment.get_segment_manager());
        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initialized storage at %p", storage);
        return true;
     } catch (const std::exception& ex) {
