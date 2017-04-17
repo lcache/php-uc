@@ -2,6 +2,11 @@
 
 // To run from the CLI:
 // php -d extension=modules/uc.so benchmark.php uc|apcu|memcache|sqlite
+//
+// Under GDB with symbols:
+// sudo dnf update --enable=updates-debuginfo
+// gdb --args php -d extension=modules/uc.so benchmark.php uc
+// (gdb) break uc_store_helper
 
 define('OPS', 1024 * 128 * 16);
 

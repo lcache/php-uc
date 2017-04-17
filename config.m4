@@ -8,8 +8,8 @@ if test "$PHP_UC" != "no"; then
   AC_DEFINE(UC, 1, [ ])
 
   dnl Enable support for C++
-  CXX_FLAGS="-std=c++14"
-  CXXFLAGS="-std=c++14"
+  CXX_FLAGS="-std=c++14 -DDEBUG -g"
+  CXXFLAGS="-std=c++14 -DDEBUG -g"
   AC_LANG_CPLUSPLUS
   PHP_REQUIRE_CXX()
 
