@@ -572,7 +572,6 @@ class uc_storage
         } catch (const std::runtime_error &e) {
             // @TODO: Print error.
         }
-
         return false;
     }
 
@@ -611,7 +610,7 @@ class uc_storage
             // @TODO: Print error.
         }
         return false;
-    }
+   }
 
     // Precondition: No locks held.
     success_t
