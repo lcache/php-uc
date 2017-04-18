@@ -4,6 +4,7 @@
 // sudo dnf update --enable=updates-debuginfo
 // gdb --args php -d extension=modules/uc.so trace.php
 // (gdb) break uc_storage::store
+// (gdb) run
 
 while(true) {
     uc_store('key', 1);

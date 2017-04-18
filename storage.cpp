@@ -62,12 +62,56 @@ class zstring_t : public string_t
     }
 };
 
+class serialized_t
+{
+  protected:
+    string_t data;
+
+  public:
+    serialized_t(const zval& val, const string_allocator_t& a)
+    : data(a)
+    {
+        smart_str strbuf = { 0 };
+        php_serialize_data_t var_hash;
+        PHP_VAR_SERIALIZE_INIT(var_hash);
+        php_var_serialize(&strbuf, (zval*) &val, &var_hash);
+        PHP_VAR_SERIALIZE_DESTROY(var_hash);
+
+        // A null string from serialization indicates that serialization failed.
+        if (strbuf.s == NULL) {
+            throw std::runtime_error("Serialization buffer is empty.");
+        }
+
+        // An exception indicates a serialization failure.
+        if (EG(exception)) {
+            smart_str_free(&strbuf);
+            throw std::runtime_error("PHP serializer generated an exception.");
+        }
+
+        string_t s(ZSTR_VAL(strbuf.s), ZSTR_LEN(strbuf.s), a);
+        smart_str_free(&strbuf);
+        data = std::move(s);
+    }
+
+    const char* c_str() const
+    {
+        return data.c_str();
+    }
+
+    std::size_t size() const
+    {
+        return data.size();
+    }
+
+};
+
 //typedef bip::managed_shared_memory::allocator<void>::type void_allocator_t;
 typedef bip::allocator<void, memory_t::segment_manager> void_allocator_t;
 
 // A cache entry and its components
 typedef zstring_t address_t;
-typedef zstring_t serialized_t;
+//typedef zstring_t serialized_t;
+
 typedef b::variant<b::blank, serialized_t, long, double> value_t;
 struct cache_entry {
     address_t address;
@@ -76,11 +120,26 @@ struct cache_entry {
     time_t expiration = 0;
     time_t last_used  = 0;
 
-    cache_entry(const zend_string& addr, const void_allocator_t& a)
+    cache_entry(const zend_string& addr, const zval& val, const void_allocator_t& a)
         : address(addr, a)
+    {
+        if (Z_TYPE_P(&val) == IS_LONG) {
+            data = Z_LVAL(val);
+        } else {
+            // If we have no special case, serialize.
+            serialized_t s(val, a);
+            data = std::move(s);
+        }
+
+    }
+
+    cache_entry(const zend_string& addr, const long val, const void_allocator_t& a) noexcept
+        : address(addr, a)
+        , data(val)
     {
     }
 
+/*
     bool
     operator<(const cache_entry& e) const
     {
@@ -92,6 +151,7 @@ struct cache_entry {
     {
         return address < a;
     }
+*/
 };
 typedef bip::managed_shared_memory::allocator<cache_entry>::type cache_entry_allocator_t;
 
@@ -479,70 +539,78 @@ class uc_storage
 
     // Precondition: No locks held.
     success_t
-    store_exclusive(const zend_string& addr, value_t v, const time_t now)
+    store_exclusive(const zend_string& addr, const zval& val, const time_t now)
     {
-        cache_entry e(addr, m_allocator);
-        e.data = std::move(v);
+        try {
+            cache_entry e(addr, val, m_allocator);
 
-        bool success = free_space(get_cost(e), now);
-        if (!success) {
-            return false;
+            bool success = free_space(get_cost(e), now);
+            if (!success) {
+                return false;
+            }
+
+            // We use an upgradable lock here because, if exclusive == true,
+            // then we may not need to block reads at all. But, if we need to
+            // upgrade, then it must be done atomically. So, we cannot start with
+            // a shared lock.
+            upgradable_lock_t ulock(m_cache_mutex);
+            auto it = m_cache.get<entry_address>().find(e.address);
+            if (m_cache.end() == it || !is_fresh(*it, now)) {
+                // We actually have to perform the insertion, so we now wait on
+                // shared locks to release.
+                exclusive_lock_t xlock(std::move(ulock));
+
+                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
+
+                std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+                //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
+
+                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
+
+                return res.second;
+            }
+        } catch (const std::runtime_error &e) {
+            // @TODO: Print error.
         }
 
-        // We use an upgradable lock here because, if exclusive == true,
-        // then we may not need to block reads at all. But, if we need to
-        // upgrade, then it must be done atomically. So, we cannot start with
-        // a shared lock.
-        upgradable_lock_t ulock(m_cache_mutex);
-        auto it = m_cache.get<entry_address>().find(e.address);
-        if (m_cache.end() == it || !is_fresh(*it, now)) {
-            // We actually have to perform the insertion, so we now wait on
-            // shared locks to release.
-            exclusive_lock_t xlock(std::move(ulock));
-
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
-
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
-            //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
-
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
-
-            return res.second;
-        }
         return false;
     }
 
     // Precondition: No locks held.
     success_t
-    store(const zend_string& addr, value_t v, const time_t now, const time_t expiration = 0)
+    store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration)
     {
-        cache_entry e(addr, m_allocator);
-        e.data = std::move(v);
-        e.expiration = expiration;
+        try {
+            cache_entry e(addr, val, m_allocator);
+            e.expiration = expiration;
 
-        bool success = free_space(get_cost(e), now);
-        if (!success) {
-            return false;
+            bool success = free_space(get_cost(e), now);
+            if (!success) {
+                return false;
+            }
+
+            //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+            exclusive_lock_t lock(m_cache_mutex /*, abs_time*/);
+
+            //if (!lock) {
+            //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "store: Timeout");
+            //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in store().");
+            //    return false;
+            //}
+
+            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
+            //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
+
+            // Replace on collision, using the matching entry as the position.
+            if (!res.second) {
+                res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
+                //res.second = m_cache.get<entry_address>().replace(res.first, e);
+            }
+            return res.second;
+        } catch (const std::runtime_error &e) {
+            // @TODO: Print error.
         }
-
-        //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        exclusive_lock_t lock(m_cache_mutex /*, abs_time*/);
-
-        //if (!lock) {
-        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "store: Timeout");
-        //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in store().");
-        //    return false;
-        //}
-
-        std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
-        //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
-
-        // Replace on collision, using the matching entry as the position.
-        if (!res.second) {
-            res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
-            //res.second = m_cache.get<entry_address>().replace(res.first, e);
-        }
-        return res.second;
+        return false;
     }
 
     // Precondition: No locks held.
@@ -619,7 +687,7 @@ class uc_storage
     {
         shared_lock_t lock(m_cache_mutex);
         for (auto i = m_cache.begin(); i != m_cache.end(); ++i) {
-            std::cout << i->address << "=" << i->data << std::endl;
+            //std::cout << i->address << ": " << i->data << std::endl;
             // std::string k(i->address.begin(), i->address.end());
             // std::string v(i->serialized.begin(), i->serialized.end());
         }
@@ -678,51 +746,21 @@ class uc_storage
 
     // Precondition: No locks held.
     success_t
-    store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration = 0, const bool exclusive = false)
+    store(const zend_string& addr, const zval& val, const time_t now, const bool exclusive = false, const time_t expiration = 0)
     {
-        //auto segment = m_allocator.get_segment_manager();
-        //bip::unique_ptr<cache_entry> entry = segment->construct<cache_entry>(bip::anonymous_instance)(addr, m_allocator);
-
-        value_t data;
-
-        if (Z_TYPE_P(&val) == IS_LONG) {
-            data = Z_LVAL(val);
-        } else {
-            smart_str strbuf = { 0 };
-            php_serialize_data_t var_hash;
-            PHP_VAR_SERIALIZE_INIT(var_hash);
-            php_var_serialize(&strbuf, (zval*) &val, &var_hash);
-            PHP_VAR_SERIALIZE_DESTROY(var_hash);
-
-            // A null string from serialization indicates that serialization failed.
-            if (strbuf.s == NULL) {
-                return 0;
-            }
-
-            // An exception indicates a serialization failure.
-            if (EG(exception)) {
-                smart_str_free(&strbuf);
-                return 0;
-            }
-
-            serialized_t s(*strbuf.s, m_allocator);
-            smart_str_free(&strbuf);
-            data = std::move(s);
-        }
-
         if (exclusive) {
-            return store_exclusive(addr, std::move(data), now);
+            return store_exclusive(addr, val, now);
         }
-        return store(addr, std::move(data), now, expiration);
+        return store(addr, val, now, expiration);
     }
 
     // Precondition: No locks held.
-    success_t
-    store(const zend_string& addr, const long val, const time_t now)
-    {
-        value_t data = val;
-        return store(addr, std::move(data), now);
-    }
+    //success_t
+    //store(const zend_string& addr, const long val, const time_t now)
+    //{
+    //    value_t data = val;
+    //    return store(addr, std::move(data), now);
+    //}
 
     // Precondition: No locks held.
     zval_and_success
@@ -738,8 +776,7 @@ class uc_storage
 
         // If there's no value yet, initialize it to the step value.
         if (m_cache.end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, m_allocator);
-            entry.data = step;
+            cache_entry entry(addr, step, m_allocator);
             exclusive_lock_t xlock(std::move(ulock));
             #ifdef _DEBUG_
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
@@ -786,8 +823,7 @@ class uc_storage
 
         // If there's no value there, succeed without comparison.
         if (m_cache.end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, m_allocator);
-            entry.data = next;
+            cache_entry entry(addr, next, m_allocator);
             exclusive_lock_t xlock(std::move(ulock));
             #ifdef _DEBUG_
             std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
@@ -916,7 +952,7 @@ uc_storage_store(
 {
     auto st = get_storage();
     try {
-        return st->store(*address, *data, now, expiration, exclusive);
+        return st->store(*address, *data, now, exclusive, expiration);
     } catch (const std::exception& ex) {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception in uc_storage_store: %s", ex.what());
     }
