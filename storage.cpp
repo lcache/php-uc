@@ -1,8 +1,10 @@
 #include <boost/interprocess/managed_shared_memory.hpp>
+#include <boost/interprocess/managed_external_buffer.hpp>
 #include <boost/interprocess/allocators/allocator.hpp>
 #include <boost/interprocess/containers/string.hpp>
 
 #include <boost/interprocess/sync/interprocess_upgradable_mutex.hpp>
+#include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/interprocess/sync/sharable_lock.hpp>
 #include <boost/interprocess/sync/upgradable_lock.hpp>
 
@@ -40,6 +42,8 @@ extern "C" {
 
 #include "storage.hpp"
 
+#define UC_CLIMATE_COUNT 3
+
 namespace b   = ::boost;
 namespace bip = b::interprocess;
 namespace bmi = b::multi_index;
@@ -47,9 +51,10 @@ namespace ba  = b::archive;
 
 // Initial shared memory
 typedef bip::managed_shared_memory memory_t;
+typedef bip::managed_external_buffer climate_memory_t;
 
 // Shared memory strings (with allocator)
-typedef bip::managed_shared_memory::allocator<char>::type string_allocator_t;
+typedef climate_memory_t::allocator<char>::type string_allocator_t;
 typedef bip::basic_string<char, std::char_traits<char>, string_allocator_t> string_t;
 
 // Extend string_t to allow construction from a zend_string.
@@ -107,6 +112,7 @@ class serialized_t
 
 //typedef bip::managed_shared_memory::allocator<void>::type void_allocator_t;
 typedef bip::allocator<void, memory_t::segment_manager> void_allocator_t;
+typedef bip::allocator<void, climate_memory_t::segment_manager> void_climate_allocator_t;
 
 // A cache entry and its components
 typedef zstring_t address_t;
@@ -118,10 +124,10 @@ struct cache_entry {
     value_t data;
 
     time_t expiration = 0;
-    time_t last_used  = 0;
 
-    cache_entry(const zend_string& addr, const zval& val, const void_allocator_t& a)
+    cache_entry(const void_climate_allocator_t& a, const zend_string& addr, const zval& val, const time_t exp)
         : address(addr, a)
+        , expiration(exp)
     {
         if (Z_TYPE_P(&val) == IS_LONG) {
             data = Z_LVAL(val);
@@ -133,7 +139,7 @@ struct cache_entry {
 
     }
 
-    cache_entry(const zend_string& addr, const long val, const void_allocator_t& a) noexcept
+    cache_entry(const void_climate_allocator_t& a, const zend_string& addr, const long val) noexcept
         : address(addr, a)
         , data(val)
     {
@@ -153,14 +159,12 @@ struct cache_entry {
     }
 */
 };
-typedef bip::managed_shared_memory::allocator<cache_entry>::type cache_entry_allocator_t;
+typedef climate_memory_t::allocator<cache_entry>::type cache_entry_allocator_t;
 
 // Index tags for MultiIndex
 struct entry_address {
 };
 struct entry_expiration {
-};
-struct entry_last_used {
 };
 
 // A replacement for std::less that supports comparing with zend_string.
@@ -223,14 +227,13 @@ typedef b::multi_index_container<
   cache_entry,
   bmi::indexed_by<
     bmi::hashed_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_hash, address_equal>,
-    bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>,
-    bmi::ranked_non_unique<bmi::tag<entry_last_used>, bmi::member<cache_entry, time_t, &cache_entry::last_used>>>,
+    bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>
+  >,
   cache_entry_allocator_t>
   lru_cache_t;
 
 typedef lru_cache_t::index<entry_address>::type lru_cache_by_address_t;
 typedef lru_cache_t::index<entry_expiration>::type lru_cache_by_expiration_t;
-typedef lru_cache_t::index<entry_last_used>::type lru_cache_by_last_used_t;
 
 class zval_visitor : public boost::static_visitor<zval>
 {
@@ -392,119 +395,196 @@ class uc_storage
 {
   protected:
     mutable bip::interprocess_upgradable_mutex m_cache_mutex;
-    const size_t m_capacity;
-    std::atomic<size_t> m_used;
     void_allocator_t m_allocator;
-    lru_cache_t m_cache;
+    std::size_t m_climate_size;
+    std::size_t m_coldest_climate_idx;
+    std::array<climate_memory_t, UC_CLIMATE_COUNT> m_climates;
+    std::array<bip::offset_ptr<lru_cache_t>, UC_CLIMATE_COUNT> m_climate_data;
 
-    // Precondition: Lock held if reference to shared memory.
     size_t
     get_cost(const cache_entry& entry) const
     {
         return b::apply_visitor(cost_visitor(), entry.data);
     }
 
-    // Precondition: Lock held if reference to shared memory.
     bool
     is_fresh(const cache_entry& entry, const time_t now) const
     {
         return (now == 0 || entry.expiration == 0 || entry.expiration < now);
     }
 
-    // Precondition: Shared lock held.
-    bool
-    needs_bump(const lru_cache_t::iterator& it) const
+    // Precondition: Exclusive lock held.
+    std::size_t
+    heat(const std::size_t current_climate_idx, lru_cache_t::iterator& it)
     {
-        const auto rank  = m_cache.get<entry_last_used>().find_rank(it->last_used);
-        const auto count = m_cache.get<entry_last_used>().size();
+        const std::size_t next_heat_idx = (current_climate_idx + 1) % UC_CLIMATE_COUNT;
 
-        // If the entry is in oldest 25% used.
-        return (rank < (count * 0.25));
+        // If heating would overflow to the coldest, don't do anything.
+        if (m_coldest_climate_idx == next_heat_idx) {
+            return current_climate_idx;
+        }
+
+        // Copy to the new heat level.
+        try {
+            // Other climates should not possess the same address we're heating.
+            // So, this should always succeed.
+            /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
+            m_climate_data[next_heat_idx]->get<entry_address>().insert(*it);
+        } catch(const bip::bad_alloc& e) {
+            // Since there's no space, do some cooling.
+            global_cooling();
+            return current_climate_idx;
+            // @TODO: Retry heating the item? Or just wait until next chance?
+        }
+
+        // Erase the old copy.
+        m_climate_data[current_climate_idx]->get<entry_address>().erase(it);
+        return next_heat_idx;
     }
 
-    // Precondition: Exclusive lock held
-    bool
-    bump(const lru_cache_t::iterator& it)
+    // Precondition: Exclusive lock held.
+    void
+    evict_expired(const time_t now)
     {
-        struct bump_cache_entry_last_used {
-            bump_cache_entry_last_used(time_t last_used)
-                : new_last_used(last_used)
-            {
+        for (std::size_t idx = 0; idx < UC_CLIMATE_COUNT; ++idx) {
+            lru_cache_by_expiration_t::iterator it_l =
+              m_climate_data[idx]->get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
+            lru_cache_by_expiration_t::iterator it_u = m_climate_data[idx]->get<entry_expiration>().upper_bound(now);
+            for (auto i = it_l; i != it_u; ++i) {
+                m_climate_data[idx]->get<entry_expiration>().erase(i);
             }
+        }
+    }
 
-            void
-            operator()(cache_entry& e)
-            {
-                e.last_used = new_last_used;
+    // Precondition: Exclusive lock held.
+    void global_cooling()
+    {
+        // Reset the current coldest climate (soon to be hottest).
+        climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
+        m_climate_data[m_coldest_climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
+        m_climates[m_coldest_climate_idx] = std::move(climate);
+
+        // Rotate the climate roles.
+        m_coldest_climate_idx = (m_coldest_climate_idx + 1) % UC_CLIMATE_COUNT;
+    }
+
+    // Precondition: Shared lock held.
+    auto get_hottest(const zend_string& addr, const time_t now = 0) const
+    {
+        b::optional<std::pair<std::size_t, lru_cache_t::iterator>> retval = b::none;
+
+        // Start with the hottest climate and move colder.
+        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; --attempts) {
+            const size_t climate_idx = (attempts + UC_CLIMATE_COUNT - 1) / UC_CLIMATE_COUNT;
+            auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
+            auto it = climate_addresses.find(addr);
+            if (climate_addresses.end() != it && is_fresh(*it, now)) {
+                retval = std::pair<std::size_t, lru_cache_t::iterator>(climate_idx, it);
+                return retval;
             }
-
-          private:
-            time_t new_last_used;
-        };
-
-        return m_cache.modify(it, bump_cache_entry_last_used(time(0)));
+        }
+        return retval;
     }
 
     // Precondition: No locks held.
-    bool
-    free_space(size_t space_needed, const time_t now)
-    {
-        // If we have enough space, it's a trivial success.
-        if (space_needed <= m_capacity - m_used) {
-            return true;
-        }
+    success_t emplace_with_cooling(const zend_string& addr, const zval& val, const time_t now, const bool replace, const time_t expiration) {
+        upgradable_lock_t ulock(m_cache_mutex);
+        exclusive_lock_t xlock;  // Holder so we can upgrade without losing scope.
 
-        // If the entry is too large to fit the cache, do nothing and fail.
-        // @TODO: Also reject items that are move than N% of the cache size?
-        if (space_needed > m_capacity) {
-            return false;
-        }
-
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        exclusive_lock_t lock(m_cache_mutex, abs_time);
-        if (!lock) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "free_space: Timeout");
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in free_space().");
-            return false;
-        }
-
-        // First, evict everything that can expire and is expired, up to the space needed.
-        lru_cache_by_expiration_t::iterator it_l =
-          m_cache.get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
-        lru_cache_by_expiration_t::iterator it_u = m_cache.get<entry_expiration>().upper_bound(now);
-        for (auto i = it_l; i != it_u; ++i) {
-            m_used -= get_cost(*i);
-            m_cache.get<entry_expiration>().erase(i);
-        }
-
-        // See if we have enough space yet.
-        if (m_capacity - m_used >= space_needed) {
-            return true;
-        }
-
-        // If we still need more space, evict the least recently used items.
-        for (auto i = m_cache.get<entry_last_used>().begin(); i != m_cache.get<entry_last_used>().end(); ++i) {
-            m_used -= get_cost(*i);
-            m_cache.get<entry_last_used>().erase(i);
-
-            // Stop evicting once we have enough space.
-            if (m_capacity - m_used >= space_needed) {
-                return true;
+        // Check for collisions in hotter climates.
+        // Handle matches as follows:
+        //  * If we're replacing *or* the entry is stale, erase.
+        //  * Otherwise, fail.
+        for (std::size_t i = 1; i < UC_CLIMATE_COUNT - 1; ++i) {
+            auto& climate_addresses = m_climate_data[(i + m_coldest_climate_idx) % UC_CLIMATE_COUNT]->get<entry_address>();
+            auto it = climate_addresses.find(addr);
+            if (climate_addresses.end() != it) {
+                if (replace || !is_fresh(*it, now)) {
+                    if (!xlock.owns()) {
+                        // It's not possible to move-assign+upgrade. So, we
+                        // move-construct+upgrade and then move-assign.
+                        exclusive_lock_t temp_xlock(std::move(ulock));
+                        xlock = std::move(temp_xlock);
+                    }
+                    climate_addresses.erase(it);
+                } else {
+                    return false;
+                }
             }
         }
 
-        // We shouldn't ever reach this point because we've emptied the
-        // entire cache, but the item is too big.
+        // Attempt to insert a number of times equal to the count of climates.
+        // Each time, run "global cooling" to potentially succeed on the next
+        // attempt.
+        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
+            // Alias the current, coldest climate.
+            auto& coldest_addresses = m_climate_data[m_coldest_climate_idx]->get<entry_address>();
+
+            // Try to find an existing, matching item.
+            auto it = coldest_addresses.find(addr);
+
+            if (it != coldest_addresses.end()) {
+                if (replace) {
+                    // Upgrade to exclusive if we haven't yet.
+                    if (!xlock.owns()) {
+                        // It's not possible to move-assign+upgrade. So, we
+                        // move-construct+upgrade and then move-assign.
+                        exclusive_lock_t temp_xlock(std::move(ulock));
+                        xlock = std::move(temp_xlock);
+                    }
+
+                    // If we can replace, erase the current item so emplace will
+                    // succeed.
+                    coldest_addresses.erase(it);
+                } else {
+                    // If we can't replace, fail because we will expect a
+                    // collision.
+                    return false;
+                }
+            }
+
+            // Upgrade to exclusive if we haven't yet.
+            if (!xlock.owns()) {
+                exclusive_lock_t temp_xlock(std::move(ulock));
+                xlock = std::move(temp_xlock);
+            }
+
+            try {
+                /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
+                coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, val, expiration);
+            } catch (bip::bad_alloc) {
+                // If there was insufficient space in the coldest climate,
+                // run cooling to potentially have success next time. Only
+                // bother to do this if we're not on the final attempt.
+                if (attempts < UC_CLIMATE_COUNT - 1) {
+                    global_cooling();  // Will alter m_coldest_climate_idx.
+                }
+            }
+        }
+
+        // If we reach this point, we've flushed everything and *still* can't
+        // allocate the item. The item must be too big.
+        // @TODO: Implement an earlier check for size to avoid cache flushing
+        // attacks.
         return false;
     }
 
   public:
-    uc_storage(size_t capacity, const void_allocator_t& allocator)
-        : m_capacity(capacity)
-        , m_used(0)
-        , m_allocator(allocator)
-        , m_cache(lru_cache_t::ctor_args_list(), allocator)
+    uc_storage(memory_t& segment)
+    : m_allocator(segment.get_segment_manager())
+    , m_climate_size((segment.get_free_memory() - 4096) / UC_CLIMATE_COUNT)
+    , m_coldest_climate_idx(0)
     {
+        // Create the climates, with each boxed into "external" buffers.
+        for (std::size_t climate_idx = 0; climate_idx < UC_CLIMATE_COUNT; ++climate_idx) {
+            auto climate_raw = segment.allocate_aligned(m_climate_size, sizeof(std::size_t));
+            climate_memory_t climate(bip::create_only, climate_raw, m_climate_size);
+
+            // Despite being inside sub-segments, the lru_cache_t objects should maintain their relative positions within the main segment.
+            m_climate_data[climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
+            m_climates[climate_idx] = std::move(climate);
+        }
+
         //std::cerr << "Storage has been initialized." << std::endl;
     }
 
@@ -514,26 +594,24 @@ class uc_storage
     }
 
     // Precondition: No locks held.
-    size_t
-    capacity() const
-    {
-        return m_capacity;
-    }
-
-    // Precondition: No locks held.
-    bool
+    success_t
     clear()
     {
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        exclusive_lock_t lock(m_cache_mutex, abs_time);
+        //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        exclusive_lock_t lock(m_cache_mutex/*, abs_time*/);
 
-        if (!lock) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "clear: Timeout");
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in clear().");
-            return false;
+        //if (!lock) {
+        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "clear: Timeout");
+        //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in clear().");
+        //    return false;
+        //}
+
+        // By "cooling" the same number of times as there are climates, the cache
+        // will be left empty.
+        for (std::size_t climate_idx = 0; climate_idx < UC_CLIMATE_COUNT; ++climate_idx) {
+            global_cooling();
         }
 
-        m_cache.clear();
         return true;
     }
 
@@ -541,76 +619,15 @@ class uc_storage
     success_t
     store_exclusive(const zend_string& addr, const zval& val, const time_t now)
     {
-        try {
-            cache_entry e(addr, val, m_allocator);
-
-            bool success = free_space(get_cost(e), now);
-            if (!success) {
-                return false;
-            }
-
-            // We use an upgradable lock here because, if exclusive == true,
-            // then we may not need to block reads at all. But, if we need to
-            // upgrade, then it must be done atomically. So, we cannot start with
-            // a shared lock.
-            upgradable_lock_t ulock(m_cache_mutex);
-            auto it = m_cache.get<entry_address>().find(e.address);
-            if (m_cache.end() == it || !is_fresh(*it, now)) {
-                // We actually have to perform the insertion, so we now wait on
-                // shared locks to release.
-                exclusive_lock_t xlock(std::move(ulock));
-
-                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Inserting: %s", e.address.c_str());
-
-                std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
-                //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
-
-                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Success? %d", res.second);
-
-                return res.second;
-            }
-        } catch (const std::runtime_error &e) {
-            // @TODO: Print error.
-        }
-        return false;
+        return emplace_with_cooling(addr, val, now, false, 0);
     }
 
     // Precondition: No locks held.
     success_t
     store(const zend_string& addr, const zval& val, const time_t now, const time_t expiration)
     {
-        try {
-            cache_entry e(addr, val, m_allocator);
-            e.expiration = expiration;
-
-            bool success = free_space(get_cost(e), now);
-            if (!success) {
-                return false;
-            }
-
-            //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-            exclusive_lock_t lock(m_cache_mutex /*, abs_time*/);
-
-            //if (!lock) {
-            //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "store: Timeout");
-            //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in store().");
-            //    return false;
-            //}
-
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(e));
-            //std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(e);
-
-            // Replace on collision, using the matching entry as the position.
-            if (!res.second) {
-                res.second = m_cache.get<entry_address>().replace(res.first, std::move(e));
-                //res.second = m_cache.get<entry_address>().replace(res.first, e);
-            }
-            return res.second;
-        } catch (const std::runtime_error &e) {
-            // @TODO: Print error.
-        }
-        return false;
-   }
+        return emplace_with_cooling(addr, val, now, true, expiration);
+    }
 
     // Precondition: No locks held.
     success_t
@@ -620,15 +637,16 @@ class uc_storage
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: ULock");
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock for %p", this);
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: ULock");
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        upgradable_lock_t ulock(m_cache_mutex, abs_time);
+        //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        upgradable_lock_t ulock(m_cache_mutex/*, abs_time*/);
+        exclusive_lock_t xlock;
         //exclusive_lock_t xlock(m_cache_mutex, abs_time);
 
-        if (!ulock) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "del: Timeout");
-            php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in del().");
-            return false;
-        }
+        //if (!ulock) {
+        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "del: Timeout");
+        //    php_error_docref(NULL TSRMLS_CC, E_ERROR, "Timed out while acquiring lock in del().");
+        //    return false;
+        //}
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Owns? %d", xlock.owns());
 
@@ -639,28 +657,24 @@ class uc_storage
 
         //address_t a(addr, m_allocator); // @TODO: Need this versus addr lookup?
 
-        auto& idx = m_cache.get<entry_address>();
-        auto it = idx.find(addr);
-        if (m_cache.end() != it) {
-            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: XLock");
-            //std::cerr << "Deletion: XLock" << std::endl << std::flush;
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: XLock");
-            // Upgrade to an exclusive lock now that we actually need to delete.
-            //exclusive_lock_t xlock(std::move(ulock));
-            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Erase");
-            //std::cerr << "Deletion: Erase" << std::endl << std::flush;
-
-            //address_t a(addr, m_allocator);
-
-            idx.erase(it);
-            //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Done");
-            //std::cerr << "Deletion: Done" << std::endl << std::flush;
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Deletion: Done.");
-            return true;
+        // @TODO: Technically, we should be able to start with the hottest
+        // climate (moving colder) and return if we delete something.
+        for (std::size_t idx = 0; idx < UC_CLIMATE_COUNT; ++idx) {
+            auto& climate_addresses = m_climate_data[idx]->get<entry_address>();
+            auto it = climate_addresses.find(addr);
+            if (climate_addresses.end() != it) {
+                if (!xlock.owns()) {
+                    exclusive_lock_t temp_xlock(std::move(ulock));
+                    xlock = std::move(temp_xlock);
+                }
+                climate_addresses.erase(it);
+                return true;
+            }
         }
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Not Found");
 
+        // Not found.
         return false;
     }
 
@@ -669,7 +683,13 @@ class uc_storage
     empty() const
     {
         shared_lock_t lock(m_cache_mutex);
-        return m_cache.empty();
+        for (std::size_t idx = 0; idx < UC_CLIMATE_COUNT; ++idx) {
+            auto& climate = m_climate_data[idx];
+            if (!climate->empty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Precondition: No locks held.
@@ -677,19 +697,24 @@ class uc_storage
     size() const
     {
         shared_lock_t lock(m_cache_mutex);
-        return m_cache.size();
+        size_t size = 0;
+        for (std::size_t idx = 0; idx < UC_CLIMATE_COUNT; ++idx) {
+            auto& climate = m_climate_data[idx];
+            size += climate->size();
+        }
+        return size;
     }
 
     // Precondition: No locks held.
     void
     dump() const
     {
-        shared_lock_t lock(m_cache_mutex);
-        for (auto i = m_cache.begin(); i != m_cache.end(); ++i) {
+        //shared_lock_t lock(m_cache_mutex);
+        //for (auto i = m_cache.begin(); i != m_cache.end(); ++i) {
             //std::cout << i->address << ": " << i->data << std::endl;
             // std::string k(i->address.begin(), i->address.end());
             // std::string v(i->serialized.begin(), i->serialized.end());
-        }
+        //}
     }
 
     // Precondition: No locks held.
@@ -698,8 +723,9 @@ class uc_storage
     {
         shared_lock_t slock(m_cache_mutex);
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Contains: Lookup");
-        auto it = m_cache.get<entry_address>().find(addr);
-        return (m_cache.end() != it && is_fresh(*it, now));
+
+        auto maybe = get_hottest(addr, now);
+        return (b::none != maybe);
     }
 
     // Precondition: No locks held.
@@ -707,35 +733,43 @@ class uc_storage
     get(const zend_string& addr, const time_t now)
     {
         zval_and_success ret;
-        auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
-        shared_lock_t slock(m_cache_mutex, abs_time);
+        //auto abs_time = b::get_system_time() + b::posix_time::milliseconds(100);
+        shared_lock_t slock(m_cache_mutex /*, abs_time*/);
         //exclusive_lock_t xlock(m_cache_mutex, abs_time);
 
-        if (!slock.owns()) {
-            syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "get: Timeout");
-            php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in get().");
-            ZVAL_FALSE(&(ret.val));
-            ret.success = false;
-            return ret;
-        }
+        //if (!slock.owns()) {
+        //    syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "get: Timeout");
+        //    php_error_docref(NULL TSRMLS_CC, E_WARNING, "Timed out while acquiring lock in get().");
+        //    ZVAL_FALSE(&(ret.val));
+        //    ret.success = false;
+        //    return ret;
+        //}
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Get: Lookup");
-        auto it = m_cache.get<entry_address>().find(addr);
 
-        if (m_cache.end() != it && is_fresh(*it, now)) {
-            ret.val     = b::apply_visitor(zval_visitor(), it->data);
-            ret.success = true;
+        // Start with the hottest climate and move colder.
+        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; --attempts) {
+            const size_t climate_idx = (attempts + UC_CLIMATE_COUNT - 1) / UC_CLIMATE_COUNT;
+            auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
+            auto it = climate_addresses.find(addr);
+            if (climate_addresses.end() != it && is_fresh(*it, now)) {
+                ret.val     = b::apply_visitor(zval_visitor(), it->data);
+                ret.success = true;
 
-            if (needs_bump(it)) {
-                // Bumping in the LRU is best-effort. This conversion will only
-                // succeed if other shared locks aren't held.
-                exclusive_lock_t xlock(std::move(slock), bip::try_to_lock);
-                if (xlock) {
-                    bump(it);
+                // Check if we found a match in anything but the hottest climate.
+                // While heat() will never overflow (to coldest), we can avoid an
+                // exclusive lock by checking early.
+                if (attempts > 0) {
+                    // Bumping heat is best-effort. This conversion will only
+                    // succeed if other shared locks aren't held.
+                    exclusive_lock_t xlock(std::move(slock), bip::try_to_lock);
+                    if (xlock) {
+                        heat(climate_idx, it);
+                    }
                 }
-            }
+                return ret;
 
-            return ret;
+            }
         }
 
         ZVAL_FALSE(&(ret.val));
@@ -768,41 +802,49 @@ class uc_storage
         zval_and_success ret;
         upgradable_lock_t ulock(m_cache_mutex);
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
-        auto it = m_cache.get<entry_address>().find(addr);
         b::optional<value_t> next_value;
+        auto maybe = get_hottest(addr);
 
         ret.success = false;
 
         // If there's no value yet, initialize it to the step value.
-        if (m_cache.end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, step, m_allocator);
+        if (b::none == maybe) {
             exclusive_lock_t xlock(std::move(ulock));
-            #ifdef _DEBUG_
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
-            assert(res.second);  // Insertion should always succeed because of the iterator lookup.
-            #else
-            m_cache.get<entry_address>().insert(std::move(entry));
-            #endif
+
+            for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
+                // Alias the current, coldest climate.
+                auto& coldest_addresses = m_climate_data[m_coldest_climate_idx]->get<entry_address>();
+                try {
+                    coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, step);
+                } catch (bip::bad_alloc) {
+                    if (attempts < UC_CLIMATE_COUNT - 1) {
+                        global_cooling();
+                    }
+                }
+            }
+
             ZVAL_LONG(&ret.val, step);
             ret.success = true;
             return ret;
         }
 
+        auto found = *maybe;
         auto bound_visitor    = std::bind(increment_visitor(), std::placeholders::_1, step);
-        auto next_value_maybe = b::apply_visitor(bound_visitor, it->data);
+        auto next_value_maybe = b::apply_visitor(bound_visitor, found.second->data);
 
         // We can only increment if there was a valid value to increment
         // already.
         if (b::none != next_value_maybe) {
             value_t next_value = *next_value_maybe;
             exclusive_lock_t xlock(std::move(ulock));
-            m_cache.modify(it, set_entry_value(next_value));
+
+            // @TODO: It's probably safe to assume this won't throw bad_alloc,
+            // but it would be good to make sure.
+            m_climate_data[found.first]->modify(found.second, set_entry_value(next_value));
             ret.val     = b::apply_visitor(zval_visitor(), next_value);
             ret.success = true;
 
-            if (needs_bump(it)) {
-                bump(it);
-            }
+            heat(found.first, found.second);
 
             return ret;
         }
@@ -818,30 +860,39 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
-        auto it = m_cache.get<entry_address>().find(addr);
+        auto maybe = get_hottest(addr);
+        //auto it = m_cache.get<entry_address>().find(addr);
 
-        // If there's no value there, succeed without comparison.
-        if (m_cache.end() == it || !is_fresh(*it, now)) {
-            cache_entry entry(addr, next, m_allocator);
+        // If there's no value present, succeed without comparison (just emplace).
+        if (b::none == maybe) {
             exclusive_lock_t xlock(std::move(ulock));
-            #ifdef _DEBUG_
-            std::pair<lru_cache_by_address_t::iterator, bool> res = m_cache.get<entry_address>().insert(std::move(entry));
-            assert(res.second);
-            #else
-            m_cache.get<entry_address>().insert(std::move(entry));
-            #endif
+
+            for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
+                // Alias the current, coldest climate.
+                auto& coldest_addresses = m_climate_data[m_coldest_climate_idx]->get<entry_address>();
+                try {
+                    coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, next);
+                } catch (bip::bad_alloc) {
+                    if (attempts < UC_CLIMATE_COUNT - 1) {
+                        global_cooling();
+                    }
+                }
+            }
+
             return true;
         }
 
+        auto found = *maybe;
+
         // If the value doesn't match what's expected (or is the wrong type), fail.
         auto bound_visitor = std::bind(cas_match_visitor(), std::placeholders::_1, expected);
-        if (!b::apply_visitor(bound_visitor, it->data)) {
+        if (!b::apply_visitor(bound_visitor, found.second->data)) {
             return false;
         }
 
         // Store the new value.
         exclusive_lock_t xlock(std::move(ulock));
-        m_cache.modify(it, set_entry_value(next));
+        m_climate_data[found.first]->modify(found.second, set_entry_value(next));
         return true;
     }
 };
@@ -880,19 +931,16 @@ uc_storage_init(const size_t size)
     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Removing existing shared storage...");
 
     bip::shared_memory_object::remove("uc");
-
-    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initializing shared storage of size %lu...", size);
-
     try {
-       memory_t segment(bip::create_only, "uc", size * 2);
-       /*uc_storage* storage = */segment.construct<uc_storage>("storage")(size, segment.get_segment_manager());
+       memory_t segment(bip::create_only, "uc", size);
+       /*uc_storage* storage = */segment.construct<uc_storage>("storage")(segment);
        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Initialized storage at %p", storage);
-       return true;
     } catch (const std::exception& ex) {
-       php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while initializing interprocess storage: %s", ex.what());
+       php_error_docref(NULL TSRMLS_CC, E_ERROR, "Exception while initializing coordinating storage: %s", ex.what());
+       return false;
     }
 
-    return false;
+    return true;
 }
 
 // Precondition: After forking (if forking)
@@ -1021,3 +1069,4 @@ uc_storage_dump(uc_storage_t st_opaque)
 }
 
 } // extern "C"
+
