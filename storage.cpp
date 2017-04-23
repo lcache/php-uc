@@ -234,14 +234,14 @@ struct address_hash {
 typedef b::multi_index_container<
   cache_entry,
   bmi::indexed_by<
-    bmi::hashed_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_hash, address_equal>,
-    bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>
+    bmi::hashed_unique<bmi::tag<entry_address>, bmi::member<cache_entry, address_t, &cache_entry::address>, address_hash, address_equal>
+    /*,bmi::ordered_non_unique<bmi::tag<entry_expiration>, bmi::member<cache_entry, time_t, &cache_entry::expiration>>*/
   >,
   cache_entry_allocator_t>
   lru_cache_t;
 
 typedef lru_cache_t::index<entry_address>::type lru_cache_by_address_t;
-typedef lru_cache_t::index<entry_expiration>::type lru_cache_by_expiration_t;
+//typedef lru_cache_t::index<entry_expiration>::type lru_cache_by_expiration_t;
 
 class zval_visitor : public boost::static_visitor<zval>
 {
@@ -406,6 +406,7 @@ class uc_storage
     void_allocator_t m_allocator;
     std::size_t m_climate_size;
     std::size_t m_coldest_climate_idx;
+    std::array<bip::offset_ptr<void>, UC_CLIMATE_COUNT> m_climate_buffers;
     std::array<climate_memory_t, UC_CLIMATE_COUNT> m_climates;
     std::array<bip::offset_ptr<lru_cache_t>, UC_CLIMATE_COUNT> m_climate_data;
 
@@ -426,12 +427,12 @@ class uc_storage
     evict_expired(const time_t now)
     {
         for (std::size_t idx = 0; idx < UC_CLIMATE_COUNT; ++idx) {
-            lru_cache_by_expiration_t::iterator it_l =
-              m_climate_data[idx]->get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
-            lru_cache_by_expiration_t::iterator it_u = m_climate_data[idx]->get<entry_expiration>().upper_bound(now);
-            for (auto i = it_l; i != it_u; ++i) {
-                m_climate_data[idx]->get<entry_expiration>().erase(i);
-            }
+            //lru_cache_by_expiration_t::iterator it_l =
+            //  m_climate_data[idx]->get<entry_expiration>().lower_bound(1); // Exclude non-expiring items.
+            //lru_cache_by_expiration_t::iterator it_u = m_climate_data[idx]->get<entry_expiration>().upper_bound(now);
+            //for (auto i = it_l; i != it_u; ++i) {
+            //    m_climate_data[idx]->get<entry_expiration>().erase(i);
+            //}
         }
     }
 
@@ -441,11 +442,21 @@ class uc_storage
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: replacement of climate %lu", m_coldest_climate_idx);
 
         // Reset the current coldest climate (soon to be hottest).
-        //climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
+        climate_memory_t climate(bip::create_only, m_climate_buffers[m_coldest_climate_idx].get(), m_climate_size);
+        // @TODO: Need to clean anything here?
+        m_climate_data[m_coldest_climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
+        m_climates[m_coldest_climate_idx] = std::move(climate);
+
+        m_climate_data[m_coldest_climate_idx]->get<entry_address>().rehash(4096);
+
+        // Safest/slowest method: recursive destructors
         // @TODO: Find a less expensive way to destroy the coldest climate.
-        m_climates[m_coldest_climate_idx].destroy<lru_cache_t>(bip::unique_instance);
+        //m_climates[m_coldest_climate_idx].destroy<lru_cache_t>(bip::unique_instance);
+        //m_climate_data[m_coldest_climate_idx] = m_climates[m_coldest_climate_idx].construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), m_climates[m_coldest_climate_idx].get_segment_manager());
+
+        // This seems to break based on alignment issues.
+        //climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
         //m_climate_data[m_coldest_climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
-        m_climate_data[m_coldest_climate_idx] = m_climates[m_coldest_climate_idx].construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), m_climates[m_coldest_climate_idx].get_segment_manager());
         //m_climates[m_coldest_climate_idx] = std::move(climate);
 
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: new climate has size %lu", m_climate_data[m_coldest_climate_idx]->size());
@@ -619,12 +630,13 @@ class uc_storage
     {
         // Create the climates, with each boxed into "external" buffers.
         for (std::size_t climate_idx = 0; climate_idx < UC_CLIMATE_COUNT; ++climate_idx) {
-            auto climate_raw = segment.allocate_aligned(m_climate_size, sizeof(std::size_t));
-            climate_memory_t climate(bip::create_only, climate_raw, m_climate_size);
+            m_climate_buffers[climate_idx] = segment.allocate_aligned(m_climate_size, sizeof(std::size_t));
+            climate_memory_t climate(bip::create_only, m_climate_buffers[climate_idx].get(), m_climate_size);
 
             // Despite being inside sub-segments, the lru_cache_t objects should maintain their relative positions within the main segment.
             m_climate_data[climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
             m_climates[climate_idx] = std::move(climate);
+            m_climate_data[climate_idx]->get<entry_address>().rehash(4096);
         }
 
         //std::cerr << "Storage has been initialized." << std::endl;
