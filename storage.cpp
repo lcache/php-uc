@@ -434,7 +434,7 @@ class uc_storage
             /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
             auto res = m_climate_data[next_heat_idx]->get<entry_address>().insert(*it);
             if (!res.second) {
-                php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: unexpected failure from %lu to %lu", current_climate_idx, next_heat_idx);
+                php_error_docref(NULL TSRMLS_CC, E_ERROR, "heat: unexpected failure from %lu to %lu", current_climate_idx, next_heat_idx);
                 return current_climate_idx;
             }
 
@@ -444,7 +444,7 @@ class uc_storage
             // @TODO: Remove this explicit invalidation.
             it = m_climate_data[current_climate_idx]->end();
         } catch(const bip::bad_alloc& e) {
-            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: insufficient space to heat from %lu to %lu; cooling", current_climate_idx, next_heat_idx);
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: insufficient space to heat from %lu to %lu; cooling", current_climate_idx, next_heat_idx);
             // Since there's no space, do some cooling.
             global_cooling();
             return current_climate_idx;
@@ -512,12 +512,15 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
         exclusive_lock_t xlock;  // Holder so we can upgrade without losing scope.
 
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: addr=%s, now=%lu, replace=%lu, expiration=%lu", ZSTR_VAL(&addr), now, replace, expiration);
+
         // Check for collisions in hotter climates.
         // Handle matches as follows:
         //  * If we're replacing *or* the entry is stale, erase.
         //  * Otherwise, fail.
-        for (std::size_t i = 1; i < UC_CLIMATE_COUNT - 1; ++i) {
-            auto& climate_addresses = m_climate_data[(i + m_coldest_climate_idx) % UC_CLIMATE_COUNT]->get<entry_address>();
+        for (std::size_t i = 0; i < UC_CLIMATE_COUNT - 1; ++i) {
+            std::size_t climate_idx = (i + UC_CLIMATE_COUNT - 1) % UC_CLIMATE_COUNT;
+            auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
             auto it = climate_addresses.find(addr);
             if (climate_addresses.end() != it) {
                 if (replace || !is_fresh(*it, now)) {
@@ -527,6 +530,7 @@ class uc_storage
                         exclusive_lock_t temp_xlock(std::move(ulock));
                         xlock = std::move(temp_xlock);
                     }
+                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: erasing same address in climate %lu (b/c replace or stale)", climate_idx);
                     climate_addresses.erase(it);
                 } else {
                     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: !replace and collision with hotter");
@@ -534,6 +538,8 @@ class uc_storage
                 }
             }
         }
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: address %s was not found (or was erased) in the hotter climates", ZSTR_VAL(&addr));
 
         // Attempt to insert a number of times equal to the count of climates.
         // Each time, run "global cooling" to potentially succeed on the next
@@ -555,6 +561,8 @@ class uc_storage
                         xlock = std::move(temp_xlock);
                     }
 
+                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: erasing address %s from the coldest climate", ZSTR_VAL(&addr));
+
                     // If we can replace, erase the current item so emplace will
                     // succeed.
                     coldest_addresses.erase(it);
@@ -573,8 +581,12 @@ class uc_storage
             }
 
             try {
-                /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
-                coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, val, expiration);
+                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: attempting emplace with climate %lu", m_coldest_climate_idx);
+                auto res = coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, val, expiration);
+                if (!res.second) {
+                    php_error_docref(NULL TSRMLS_CC, E_ERROR, "emplace_with_cooling: unexpected collision in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
+                    return false;
+                }
                 return true;
             } catch (bip::bad_alloc) {
                 // If there was insufficient space in the coldest climate,
@@ -590,7 +602,7 @@ class uc_storage
         // allocate the item. The item must be too big.
         // @TODO: Implement an earlier check for size to avoid cache flushing
         // attacks.
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: too big");
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "emplace_with_cooling: too big");
         return false;
     }
 
@@ -684,23 +696,27 @@ class uc_storage
 
         // @TODO: Technically, we should be able to start with the hottest
         // climate (moving colder) and return if we delete something.
-        for (std::size_t idx = 0; idx < UC_CLIMATE_COUNT; ++idx) {
-            auto& climate_addresses = m_climate_data[idx]->get<entry_address>();
+        success_t success = false;
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "del: address %s", ZSTR_VAL(&addr));
+
+        for (std::size_t climate_idx = 0; climate_idx < UC_CLIMATE_COUNT; ++climate_idx) {
+            auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
             auto it = climate_addresses.find(addr);
             if (climate_addresses.end() != it) {
                 if (!xlock.owns()) {
                     exclusive_lock_t temp_xlock(std::move(ulock));
                     xlock = std::move(temp_xlock);
                 }
+                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "del: removing address %s from climate %lu", ZSTR_VAL(&addr), climate_idx);
                 climate_addresses.erase(it);
-                return true;
+                success = true;
             }
         }
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Deletion: Not Found");
 
-        // Not found.
-        return false;
+        return success;
     }
 
     // Precondition: No locks held.
@@ -846,7 +862,7 @@ class uc_storage
                 try {
                     auto res = coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, step);
                     if (!res.second) {
-                        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: unexpected failure initializing %s to value %ld", ZSTR_VAL(&addr), step);
+                        php_error_docref(NULL TSRMLS_CC, E_ERROR, "increment_or_initialize: unexpected failure initializing %s to value %ld", ZSTR_VAL(&addr), step);
                         //auto maybe_it = get_hottest(addr, 0);
                         //if (b::none != maybe_it) {
                         //    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: get_hottest found a collision");
