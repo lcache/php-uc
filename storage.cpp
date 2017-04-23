@@ -139,7 +139,7 @@ struct cache_entry {
 
     }
 
-    cache_entry(const void_climate_allocator_t& a, const zend_string& addr, const long val) noexcept
+    cache_entry(const void_climate_allocator_t& a, const zend_string& addr, const long val)
         : address(addr, a)
         , data(val)
     {
@@ -419,8 +419,11 @@ class uc_storage
     {
         const std::size_t next_heat_idx = (current_climate_idx + 1) % UC_CLIMATE_COUNT;
 
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: requested from %lu to %lu", current_climate_idx, next_heat_idx);
+
         // If heating would overflow to the coldest, don't do anything.
         if (m_coldest_climate_idx == next_heat_idx) {
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: %lu is already the hottest climate", current_climate_idx);
             return current_climate_idx;
         }
 
@@ -429,16 +432,26 @@ class uc_storage
             // Other climates should not possess the same address we're heating.
             // So, this should always succeed.
             /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
-            m_climate_data[next_heat_idx]->get<entry_address>().insert(*it);
+            auto res = m_climate_data[next_heat_idx]->get<entry_address>().insert(*it);
+            if (!res.second) {
+                php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: unexpected failure from %lu to %lu", current_climate_idx, next_heat_idx);
+                return current_climate_idx;
+            }
+
+            // Erase the old copy.
+            m_climate_data[current_climate_idx]->get<entry_address>().erase(it);
+
+            // @TODO: Remove this explicit invalidation.
+            it = m_climate_data[current_climate_idx]->end();
         } catch(const bip::bad_alloc& e) {
+            php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: insufficient space to heat from %lu to %lu; cooling", current_climate_idx, next_heat_idx);
             // Since there's no space, do some cooling.
             global_cooling();
             return current_climate_idx;
             // @TODO: Retry heating the item? Or just wait until next chance?
         }
 
-        // Erase the old copy.
-        m_climate_data[current_climate_idx]->get<entry_address>().erase(it);
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: success from %lu to %lu", current_climate_idx, next_heat_idx);
         return next_heat_idx;
     }
 
@@ -459,6 +472,8 @@ class uc_storage
     // Precondition: Exclusive lock held.
     void global_cooling()
     {
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling");
+
         // Reset the current coldest climate (soon to be hottest).
         climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
         m_climate_data[m_coldest_climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
@@ -473,16 +488,22 @@ class uc_storage
     {
         b::optional<std::pair<std::size_t, lru_cache_t::iterator>> retval = b::none;
 
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "get_hottest: searching for address %s", ZSTR_VAL(&addr));
+
         // Start with the hottest climate and move colder.
-        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; --attempts) {
-            const size_t climate_idx = (attempts + UC_CLIMATE_COUNT - 1) / UC_CLIMATE_COUNT;
+        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
+            const size_t climate_idx = (attempts + UC_CLIMATE_COUNT - 1) % UC_CLIMATE_COUNT;
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "get_hottest: searching climate %lu", climate_idx);
             auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
             auto it = climate_addresses.find(addr);
             if (climate_addresses.end() != it && is_fresh(*it, now)) {
                 retval = std::pair<std::size_t, lru_cache_t::iterator>(climate_idx, it);
+                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "get_hottest: found in climate %lu", climate_idx);
                 return retval;
             }
         }
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "get_hottest: not found");
         return retval;
     }
 
@@ -752,8 +773,8 @@ class uc_storage
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Get: Lookup");
 
         // Start with the hottest climate and move colder.
-        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; --attempts) {
-            const size_t climate_idx = (attempts + UC_CLIMATE_COUNT - 1) / UC_CLIMATE_COUNT;
+        for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
+            const size_t climate_idx = (attempts + UC_CLIMATE_COUNT - 1) % UC_CLIMATE_COUNT;
             auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
             auto it = climate_addresses.find(addr);
             if (climate_addresses.end() != it && is_fresh(*it, now)) {
@@ -807,29 +828,46 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
         b::optional<value_t> next_value;
-        auto maybe = get_hottest(addr);
+        auto maybe = get_hottest(addr, 0);
+
+        // @TODO: Check for expiration somewhere. We can't offload it to get_hottest()
+        // because we need to guarantee emplace success on b::none.
 
         ret.success = false;
 
-        // If there's no value yet, initialize it to the step value.
+        // If there's no value yet, initialize it to the step value in the coldest climate.
         if (b::none == maybe) {
             exclusive_lock_t xlock(std::move(ulock));
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Storing new value of %ld", step);
 
             for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
                 // Alias the current, coldest climate.
                 auto& coldest_addresses = m_climate_data[m_coldest_climate_idx]->get<entry_address>();
                 try {
-                    coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, step);
+                    auto res = coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, step);
+                    if (!res.second) {
+                        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: unexpected failure initializing %s to value %ld", ZSTR_VAL(&addr), step);
+                        //auto maybe_it = get_hottest(addr, 0);
+                        //if (b::none != maybe_it) {
+                        //    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: get_hottest found a collision");
+                        //}
+
+                        //auto it = coldest_addresses.find(addr);
+                        //if (coldest_addresses.end() != it) {
+                        //    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: found a collision");
+                        //}
+                        ret.success = false;
+                        return ret;
+                    }
+                    ZVAL_LONG(&ret.val, step);
+                    ret.success = true;
+                    return ret;
                 } catch (bip::bad_alloc) {
                     if (attempts < UC_CLIMATE_COUNT - 1) {
                         global_cooling();
                     }
                 }
             }
-
-            ZVAL_LONG(&ret.val, step);
-            ret.success = true;
-            return ret;
         }
 
         auto found = *maybe;
@@ -842,16 +880,26 @@ class uc_storage
             value_t next_value = *next_value_maybe;
             exclusive_lock_t xlock(std::move(ulock));
 
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Updating value by step %ld.", step);
+
             // @TODO: It's probably safe to assume this won't throw bad_alloc,
-            // but it would be good to make sure.
+            // but it would be good to make sure. Fix when adding the optimization
+            // in the TODO below.
             m_climate_data[found.first]->modify(found.second, set_entry_value(next_value));
             ret.val     = b::apply_visitor(zval_visitor(), next_value);
             ret.success = true;
 
-            heat(found.first, found.second);
+            // @TODO: Rather than increment in place and heat, we should write
+            // directly to the climate one hotter than the current.
+            /*auto new_heat =*/ heat(found.first, found.second);
+            //if (new_heat == found.first) {
+                //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: no heating completed from %lu", found.first);
+            //}
 
             return ret;
         }
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "increment_or_initialize: failure");
 
         ZVAL_NULL(&ret.val);
         return ret;
@@ -864,8 +912,11 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
-        auto maybe = get_hottest(addr);
+        auto maybe = get_hottest(addr, 0);
         //auto it = m_cache.get<entry_address>().find(addr);
+
+        // @TODO: Check for expiration somewhere. We can't offload it to get_hottest()
+        // because we need to guarantee emplace success on b::none.
 
         // If there's no value present, succeed without comparison (just emplace).
         if (b::none == maybe) {
@@ -888,6 +939,7 @@ class uc_storage
 
         auto found = *maybe;
 
+
         // If the value doesn't match what's expected (or is the wrong type), fail.
         auto bound_visitor = std::bind(cas_match_visitor(), std::placeholders::_1, expected);
         if (!b::apply_visitor(bound_visitor, found.second->data)) {
@@ -897,6 +949,10 @@ class uc_storage
         // Store the new value.
         exclusive_lock_t xlock(std::move(ulock));
         m_climate_data[found.first]->modify(found.second, set_entry_value(next));
+
+        // @TODO: Rather than alter in place and heat, we should write
+        // directly to the climate one hotter than the current.
+        heat(found.first, found.second);
         return true;
     }
 };

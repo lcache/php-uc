@@ -6,7 +6,7 @@
 // (gdb) break uc_storage::store
 // (gdb) run
 
-while(true) {
-    uc_store('key', 1);
-}
+uc_store('foobar',2);
+uc_inc('foobar');
+uc_inc('foobar', 10);
 
