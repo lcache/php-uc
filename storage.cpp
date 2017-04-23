@@ -508,6 +508,7 @@ class uc_storage
                     }
                     climate_addresses.erase(it);
                 } else {
+                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: !replace and collision with hotter");
                     return false;
                 }
             }
@@ -539,6 +540,7 @@ class uc_storage
                 } else {
                     // If we can't replace, fail because we will expect a
                     // collision.
+                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: !replace and collision with coldest");
                     return false;
                 }
             }
@@ -552,6 +554,7 @@ class uc_storage
             try {
                 /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
                 coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, val, expiration);
+                return true;
             } catch (bip::bad_alloc) {
                 // If there was insufficient space in the coldest climate,
                 // run cooling to potentially have success next time. Only
@@ -566,6 +569,7 @@ class uc_storage
         // allocate the item. The item must be too big.
         // @TODO: Implement an earlier check for size to avoid cache flushing
         // attacks.
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: too big");
         return false;
     }
 
