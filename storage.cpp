@@ -201,12 +201,20 @@ struct address_equal {
     bool
     operator()(const zend_string& s0, const address_t& s1) const
     {
+        if (ZSTR_LEN(&s0) != s1.size()) {
+            return false;
+        }
+
         return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) == 0;
     }
 
     bool
     operator()(const address_t& s0, const zend_string& s1) const
     {
+        if (s0.size() != ZSTR_LEN(&s1)) {
+            return false;
+        }
+
         return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) == 0;
     }
 };
@@ -430,12 +438,19 @@ class uc_storage
     // Precondition: Exclusive lock held.
     void global_cooling()
     {
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling");
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: replacement of climate %lu", m_coldest_climate_idx);
 
         // Reset the current coldest climate (soon to be hottest).
-        climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
-        m_climate_data[m_coldest_climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
-        m_climates[m_coldest_climate_idx] = std::move(climate);
+        //climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
+        // @TODO: Find a less expensive way to destroy the coldest climate.
+        m_climates[m_coldest_climate_idx].destroy<lru_cache_t>(bip::unique_instance);
+        //m_climate_data[m_coldest_climate_idx] = climate.construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), climate.get_segment_manager());
+        m_climate_data[m_coldest_climate_idx] = m_climates[m_coldest_climate_idx].construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), m_climates[m_coldest_climate_idx].get_segment_manager());
+        //m_climates[m_coldest_climate_idx] = std::move(climate);
+
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: new climate has size %lu", m_climate_data[m_coldest_climate_idx]->size());
+
+        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: rotation");
 
         // Rotate the climate roles.
         m_coldest_climate_idx = (m_coldest_climate_idx + 1) % UC_CLIMATE_COUNT;
@@ -536,7 +551,7 @@ class uc_storage
                         exclusive_lock_t temp_xlock(std::move(ulock));
                         xlock = std::move(temp_xlock);
                     }
-                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: erasing same address in climate %lu (b/c replace or stale)", climate_idx);
+
                     climate_addresses.erase(it);
                 } else {
                     //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: !replace and collision with hotter");
@@ -564,7 +579,13 @@ class uc_storage
                 //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: attempting emplace with climate %lu", m_coldest_climate_idx);
                 auto res = coldest_addresses.emplace(m_climates[m_coldest_climate_idx].get_segment_manager(), addr, val, expiration);
                 if (!res.second) {
-                    php_error_docref(NULL TSRMLS_CC, E_ERROR, "emplace_with_cooling: unexpected collision in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
+                    php_error_docref(NULL TSRMLS_CC, E_WARNING, "emplace_with_cooling: unexpected collision in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
+
+                    auto maybe = coldest_addresses.find(addr);
+                    if (coldest_addresses.end() != maybe) {
+                        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: collision detected in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
+                    }
+
                     return false;
                 }
                 return true;

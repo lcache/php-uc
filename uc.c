@@ -63,7 +63,7 @@ ZEND_GET_MODULE(uc)
 
 PHP_INI_BEGIN()
 STD_PHP_INI_BOOLEAN("uc.enabled", "1", PHP_INI_SYSTEM, OnUpdateBool, enabled, zend_uc_globals, uc_globals)
-STD_PHP_INI_ENTRY("uc.size_in_mb", "32", PHP_INI_SYSTEM, OnUpdateLong, size_in_mb, zend_uc_globals, uc_globals)
+STD_PHP_INI_ENTRY("uc.size_in_mb", "128", PHP_INI_SYSTEM, OnUpdateLong, size_in_mb, zend_uc_globals, uc_globals)
 STD_PHP_INI_ENTRY(
   "uc.preload_path", (char*) NULL, PHP_INI_SYSTEM, OnUpdateString, preload_path, zend_uc_globals, uc_globals)
 PHP_INI_END()
