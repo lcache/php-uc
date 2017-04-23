@@ -205,7 +205,7 @@ struct address_equal {
             return false;
         }
 
-        return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), std::min(ZSTR_LEN(&s0), s1.size())) == 0;
+        return std::memcmp(ZSTR_VAL(&s0), s1.c_str(), ZSTR_LEN(&s0)) == 0;
     }
 
     bool
@@ -215,7 +215,7 @@ struct address_equal {
             return false;
         }
 
-        return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), std::min(s0.size(), ZSTR_LEN(&s1))) == 0;
+        return std::memcmp(s0.c_str(), ZSTR_VAL(&s1), ZSTR_LEN(&s1)) == 0;
     }
 };
 
@@ -438,7 +438,7 @@ class uc_storage
     // Precondition: Exclusive lock held.
     void global_cooling()
     {
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: replacement of climate %lu", m_coldest_climate_idx);
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: replacement of climate %lu", m_coldest_climate_idx);
 
         // Reset the current coldest climate (soon to be hottest).
         //climate_memory_t climate(bip::create_only, &m_climates[m_coldest_climate_idx], m_climate_size);
@@ -448,9 +448,9 @@ class uc_storage
         m_climate_data[m_coldest_climate_idx] = m_climates[m_coldest_climate_idx].construct<lru_cache_t>(bip::unique_instance) (lru_cache_t::ctor_args_list(), m_climates[m_coldest_climate_idx].get_segment_manager());
         //m_climates[m_coldest_climate_idx] = std::move(climate);
 
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: new climate has size %lu", m_climate_data[m_coldest_climate_idx]->size());
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: new climate has size %lu", m_climate_data[m_coldest_climate_idx]->size());
 
-        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: rotation");
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "global_cooling: rotation");
 
         // Rotate the climate roles.
         m_coldest_climate_idx = (m_coldest_climate_idx + 1) % UC_CLIMATE_COUNT;
@@ -581,10 +581,10 @@ class uc_storage
                 if (!res.second) {
                     php_error_docref(NULL TSRMLS_CC, E_WARNING, "emplace_with_cooling: unexpected collision in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
 
-                    auto maybe = coldest_addresses.find(addr);
-                    if (coldest_addresses.end() != maybe) {
-                        php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: collision detected in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
-                    }
+                    //auto maybe = coldest_addresses.find(addr);
+                    //if (coldest_addresses.end() != maybe) {
+                    //    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: collision detected in climate %lu for address %s", m_coldest_climate_idx, ZSTR_VAL(&addr));
+                    //}
 
                     return false;
                 }
