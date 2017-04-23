@@ -414,48 +414,6 @@ class uc_storage
     }
 
     // Precondition: Exclusive lock held.
-    std::size_t
-    heat(const std::size_t current_climate_idx, lru_cache_t::iterator& it)
-    {
-        const std::size_t next_heat_idx = (current_climate_idx + 1) % UC_CLIMATE_COUNT;
-
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: requested from %lu to %lu", current_climate_idx, next_heat_idx);
-
-        // If heating would overflow to the coldest, don't do anything.
-        if (m_coldest_climate_idx == next_heat_idx) {
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: %lu is already the hottest climate", current_climate_idx);
-            return current_climate_idx;
-        }
-
-        // Copy to the new heat level.
-        try {
-            // Other climates should not possess the same address we're heating.
-            // So, this should always succeed.
-            /*std::pair<lru_cache_by_address_t::iterator, bool> res =*/
-            auto res = m_climate_data[next_heat_idx]->get<entry_address>().insert(*it);
-            if (!res.second) {
-                php_error_docref(NULL TSRMLS_CC, E_ERROR, "heat: unexpected failure from %lu to %lu", current_climate_idx, next_heat_idx);
-                return current_climate_idx;
-            }
-
-            // Erase the old copy.
-            m_climate_data[current_climate_idx]->get<entry_address>().erase(it);
-
-            // @TODO: Remove this explicit invalidation.
-            it = m_climate_data[current_climate_idx]->end();
-        } catch(const bip::bad_alloc& e) {
-            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: insufficient space to heat from %lu to %lu; cooling", current_climate_idx, next_heat_idx);
-            // Since there's no space, do some cooling.
-            global_cooling();
-            return current_climate_idx;
-            // @TODO: Retry heating the item? Or just wait until next chance?
-        }
-
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: success from %lu to %lu", current_climate_idx, next_heat_idx);
-        return next_heat_idx;
-    }
-
-    // Precondition: Exclusive lock held.
     void
     evict_expired(const time_t now)
     {
@@ -484,7 +442,7 @@ class uc_storage
     }
 
     // Precondition: Shared lock held.
-    auto get_hottest(const zend_string& addr, const time_t now = 0) const
+    auto get_hottest(const zend_string& addr) const
     {
         b::optional<std::pair<std::size_t, lru_cache_t::iterator>> retval = b::none;
 
@@ -496,7 +454,7 @@ class uc_storage
             //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "get_hottest: searching climate %lu", climate_idx);
             auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
             auto it = climate_addresses.find(addr);
-            if (climate_addresses.end() != it && is_fresh(*it, now)) {
+            if (climate_addresses.end() != it) {
                 retval = std::pair<std::size_t, lru_cache_t::iterator>(climate_idx, it);
                 //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "get_hottest: found in climate %lu", climate_idx);
                 return retval;
@@ -507,6 +465,55 @@ class uc_storage
         return retval;
     }
 
+    // Precondition: Exclusive lock held.
+    std::size_t
+    heat(const std::size_t current_climate_idx, lru_cache_t::iterator& it)
+    {
+        const std::size_t next_heat_idx = (current_climate_idx + 1) % UC_CLIMATE_COUNT;
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: requested from %lu to %lu", current_climate_idx, next_heat_idx);
+
+        // If heating would overflow to the coldest, don't do anything.
+        if (m_coldest_climate_idx == next_heat_idx) {
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: %lu is already the hottest climate", current_climate_idx);
+            return current_climate_idx;
+        }
+
+        // Copy to the new heat level.
+        try {
+            // Other climates should not possess the same address we're heating.
+            // So, this should always succeed.
+            auto& climate = m_climate_data[next_heat_idx]->get<entry_address>();
+            auto res = climate.insert(*it);
+            if (!res.second) {
+                php_error_docref(NULL TSRMLS_CC, E_WARNING, "heat: unexpected failure from %lu to %lu", current_climate_idx, next_heat_idx);
+
+                auto maybe = climate.find(it->address);
+
+                if (climate.end() != maybe) {
+                    php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: collision detected in heat %lu for address %s", next_heat_idx, it->address.c_str());
+                }
+
+                return current_climate_idx;
+            }
+
+            // Erase the old copy.
+            m_climate_data[current_climate_idx]->get<entry_address>().erase(it);
+
+            // @TODO: Remove this explicit invalidation.
+            it = m_climate_data[current_climate_idx]->end();
+        } catch(const bip::bad_alloc& e) {
+            //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: insufficient space to heat from %lu to %lu; cooling", current_climate_idx, next_heat_idx);
+            // Since there's no space, do some cooling.
+            global_cooling();
+            return current_climate_idx;
+            // @TODO: Retry heating the item? Or just wait until next chance?
+        }
+
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "heat: success from %lu to %lu", current_climate_idx, next_heat_idx);
+        return next_heat_idx;
+    }
+
     // Precondition: No locks held.
     success_t emplace_with_cooling(const zend_string& addr, const zval& val, const time_t now, const bool replace, const time_t expiration) {
         upgradable_lock_t ulock(m_cache_mutex);
@@ -514,12 +521,11 @@ class uc_storage
 
         //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: addr=%s, now=%lu, replace=%lu, expiration=%lu", ZSTR_VAL(&addr), now, replace, expiration);
 
-        // Check for collisions in hotter climates.
+        // Check for collisions in all climates.
         // Handle matches as follows:
         //  * If we're replacing *or* the entry is stale, erase.
         //  * Otherwise, fail.
-        for (std::size_t i = 0; i < UC_CLIMATE_COUNT - 1; ++i) {
-            std::size_t climate_idx = (i + UC_CLIMATE_COUNT - 1) % UC_CLIMATE_COUNT;
+        for (std::size_t climate_idx = 0; climate_idx < UC_CLIMATE_COUNT; ++climate_idx) {
             auto& climate_addresses = m_climate_data[climate_idx]->get<entry_address>();
             auto it = climate_addresses.find(addr);
             if (climate_addresses.end() != it) {
@@ -539,7 +545,7 @@ class uc_storage
             }
         }
 
-        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: address %s was not found (or was erased) in the hotter climates", ZSTR_VAL(&addr));
+        //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: address %s was not found (or was erased)", ZSTR_VAL(&addr));
 
         // Attempt to insert a number of times equal to the count of climates.
         // Each time, run "global cooling" to potentially succeed on the next
@@ -547,32 +553,6 @@ class uc_storage
         for (std::size_t attempts = 0; attempts < UC_CLIMATE_COUNT; ++attempts) {
             // Alias the current, coldest climate.
             auto& coldest_addresses = m_climate_data[m_coldest_climate_idx]->get<entry_address>();
-
-            // Try to find an existing, matching item.
-            auto it = coldest_addresses.find(addr);
-
-            if (it != coldest_addresses.end()) {
-                if (replace) {
-                    // Upgrade to exclusive if we haven't yet.
-                    if (!xlock.owns()) {
-                        // It's not possible to move-assign+upgrade. So, we
-                        // move-construct+upgrade and then move-assign.
-                        exclusive_lock_t temp_xlock(std::move(ulock));
-                        xlock = std::move(temp_xlock);
-                    }
-
-                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: erasing address %s from the coldest climate", ZSTR_VAL(&addr));
-
-                    // If we can replace, erase the current item so emplace will
-                    // succeed.
-                    coldest_addresses.erase(it);
-                } else {
-                    // If we can't replace, fail because we will expect a
-                    // collision.
-                    //php_error_docref(NULL TSRMLS_CC, E_NOTICE, "emplace_with_cooling: !replace and collision with coldest");
-                    return false;
-                }
-            }
 
             // Upgrade to exclusive if we haven't yet.
             if (!xlock.owns()) {
@@ -588,13 +568,17 @@ class uc_storage
                     return false;
                 }
                 return true;
-            } catch (bip::bad_alloc) {
+            } catch (const bip::bad_alloc &e) {
                 // If there was insufficient space in the coldest climate,
                 // run cooling to potentially have success next time. Only
                 // bother to do this if we're not on the final attempt.
                 if (attempts < UC_CLIMATE_COUNT - 1) {
                     global_cooling();  // Will alter m_coldest_climate_idx.
                 }
+            } catch (const std::runtime_error &e) {
+                // Catch errors in constructing the entry, usually serialization errors.
+                //php_error_docref(NULL TSRMLS_CC, E_WARNING, "Serialization error: %s", e.what());
+                return false;
             }
         }
 
@@ -765,8 +749,8 @@ class uc_storage
         shared_lock_t slock(m_cache_mutex);
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "Contains: Lookup");
 
-        auto maybe = get_hottest(addr, now);
-        return (b::none != maybe);
+        auto maybe = get_hottest(addr);
+        return (b::none != maybe && is_fresh(*maybe->second, now));
     }
 
     // Precondition: No locks held.
@@ -844,10 +828,9 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "increment_or_initialize: Lookup");
         b::optional<value_t> next_value;
-        auto maybe = get_hottest(addr, 0);
+        auto maybe = get_hottest(addr);
 
-        // @TODO: Check for expiration somewhere. We can't offload it to get_hottest()
-        // because we need to guarantee emplace success on b::none.
+        // @TODO: Check for expiration somewhere.
 
         ret.success = false;
 
@@ -928,11 +911,10 @@ class uc_storage
         upgradable_lock_t ulock(m_cache_mutex);
 
         //syslog(LOG_MAKEPRI(LOG_LOCAL1, LOG_WARNING), "cas: Lookup");
-        auto maybe = get_hottest(addr, 0);
+        auto maybe = get_hottest(addr);
         //auto it = m_cache.get<entry_address>().find(addr);
 
-        // @TODO: Check for expiration somewhere. We can't offload it to get_hottest()
-        // because we need to guarantee emplace success on b::none.
+        // @TODO: Check for expiration somewhere.
 
         // If there's no value present, succeed without comparison (just emplace).
         if (b::none == maybe) {
